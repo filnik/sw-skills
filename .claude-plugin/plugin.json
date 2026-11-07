@@ -1,0 +1,12 @@
+{
+  "name": "dev",
+  "displayName": "Dev workflow skills",
+  "version": "0.1.0",
+  "description": "Everyday development skills for Claude Code: pick up an issue, file one, research a question, commit and push, open a PR, babysit it to merge, merge the base and fix conflicts, find out why CI is red, recap where the work stands, list the PRs that need you, write your standup, answer questions about the git history, write a release's notes and check its crashes, test the app on real phones, and free disk space safely.",
+  "author": {
+    "name": "Filippo De Pretto"
+  },
+  "repository": "https://github.com/filnik/sw-skills",
+  "license": "MIT",
+  "keywords": ["git", "github", "pull-request", "code-review", "ci", "merge", "issues", "clickup", "research", "standup", "crashlytics", "sentry", "android", "ios", "device-testing", "workflow"]
+}
