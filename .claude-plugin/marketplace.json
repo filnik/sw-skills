@@ -1,0 +1,15 @@
+{
+  "name": "sw-skills",
+  "owner": {
+    "name": "Filippo De Pretto"
+  },
+  "description": "Claude Code skills for everyday software development.",
+  "plugins": [
+    {
+      "name": "dev",
+      "source": "./",
+      "description": "Development workflow: /dev:pick, /dev:ticket, /dev:research, /dev:commit-push, /dev:pr-create, /dev:babysit, /dev:merge, /dev:ci-why, /dev:recap, /dev:my-prs, /dev:standup, /dev:history, /dev:crashes, /dev:release-notes, /dev:device-test, /dev:disk-cleanup.",
+      "version": "0.1.0"
+    }
+  ]
+}
