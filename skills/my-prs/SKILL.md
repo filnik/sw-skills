@@ -27,7 +27,7 @@ In the user's language, short:
 - one line: how many PRs, how many need the user;
 - **Tocca a te / Your turn**: one line per PR, `repo#N` with its link, the title, and the step with the skill that
   does it (`/dev:merge`, `/dev:ci-why`, `/dev:babysit`);
-- **In attesa / Waiting**: one line per PR, who or what it waits for, and for how long;
+- **In attesa / Waiting**: one line per PR, who or what it waits for, and the PR's age (the `Nd` column, days since it was opened);
 - **Draft**: only how many and which, unless the user asks more.
 
 End with the one step to take first: the PR closest to merging usually wins over the newest one.

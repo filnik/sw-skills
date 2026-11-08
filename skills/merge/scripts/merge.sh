@@ -24,7 +24,7 @@ show_conflicts() {
 }
 
 start() {
-  local target="" origin_of="named" pr
+  local target="" origin_of="named" pr err why out
   [ $# -le 1 ] || die "usage: merge.sh start [TARGET]"
   target=${1:-}
   if in_merge; then
@@ -38,7 +38,18 @@ start() {
   fi
 
   if [ -z "$target" ]; then
-    pr=$(gh pr view --json number,baseRefName,state --jq 'select(.state=="OPEN") | "\(.number) \(.baseRefName)"' 2>/dev/null)
+    # Only gh's own "no PR" answer allows the default branch: a gh that is missing, logged out or offline says
+    # nothing about the PR, and guessing would merge (and push) the wrong base into a stacked branch.
+    err=$(mktemp "${TMPDIR:-/tmp}/merge-gh.XXXXXX")
+    if pr=$(gh pr view --json number,baseRefName,state --jq 'select(.state=="OPEN") | "\(.number) \(.baseRefName)"' 2>"$err"); then
+      :
+    elif grep -q "no pull requests found" "$err"; then
+      pr=""
+    else
+      why=$(head -1 "$err"); rm -f "$err"
+      die "gh failed (${why:-no output}): name the target, e.g. merge.sh start develop"
+    fi
+    rm -f "$err"
     if [ -n "$pr" ]; then
       target=${pr#* }; origin_of="base of PR #${pr%% *}"
     else
@@ -72,7 +83,6 @@ start() {
   fi
   echo "$(git rev-list --count "HEAD..origin/$target") commits coming in"
 
-  local out
   out=$(git merge --no-ff --no-commit "origin/$target" 2>&1)
   in_merge || { echo "$out" >&2; die "the merge did not start"; }
   mkdir -p "$state"
@@ -113,7 +123,7 @@ abort() {
   if ! in_merge && [ ! -f "$state/target" ]; then die "no merge in progress"; fi
   if in_merge; then git merge --abort || die "git merge --abort failed"; fi
   rm -rf "$state"
-  echo "merge aborted: $branch is as it was before start"
+  echo "merge aborted: $branch is as it was before the merge"
 }
 
 case "$cmd" in

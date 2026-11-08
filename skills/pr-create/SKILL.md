@@ -1,6 +1,6 @@
 ---
 name: pr-create
-description: Opens the pull request of the current branch with gh, or updates the one already open - title and body from the repo's PR template, base from the open PR or the repo's default branch (asking when the branch looks stacked on another feature branch), and only the tests that really ran. Pushes the branch first when needed; stops on uncommitted work. Use for "/pr-create", "open the PR", "create a pull request", "make a PR", "apri la PR", "crea la PR". Not for committing (commit-push), following the review afterwards (babysit) or a red CI (ci-why).
+description: Opens the pull request of the current branch with gh, or updates the one already open - title and body from the repo's PR template, base from the branch you name, else the open PR, else the repo's default branch (asking when the branch looks stacked on another feature branch), and only the tests that really ran. Pushes the branch first when needed; stops on uncommitted work. Use for "/pr-create", "open the PR", "create a pull request", "make a PR", "apri la PR", "crea la PR". Not for committing (commit-push), following the review afterwards (babysit) or a red CI (ci-why).
 ---
 
 # pr-create
@@ -10,12 +10,12 @@ Needs `gh`, logged in, with network access.
 ## 1. Context
 
 ```bash
-git status --short --branch; gh pr view --json number,url,state,baseRefName; gh repo view --json defaultBranchRef -q .defaultBranchRef.name; git fetch -q origin
+git status --short --branch; gh pr view --json number,url,state,baseRefName,title,body; gh repo view --json defaultBranchRef -q .defaultBranchRef.name; git fetch -q origin
 ```
 
 - **Uncommitted changes**: list them and stop, proposing the commit-push skill. A PR opened now would miss them.
 - **An open PR for this branch**: update it (step 4), never open a second one. A merged or closed PR does not count.
-- **The base**: the open PR's base; else the branch the user named; else the default branch. When the branch seems
+- **The base**: the branch the user named; else the open PR's base; else the default branch. When the branch seems
   to start from another feature branch, ask. This prints the nearest origin branches in its history:
 
   ```bash
@@ -60,6 +60,8 @@ Write the body to a temporary file.
 
 - Never claim a test, a check or a manual try that did not happen in this session or that the user did not report.
   Leave a template checkbox unticked when you cannot know.
+- **Updating an open PR**: start from its current title and body (step 1), not from scratch. Keep what a person
+  added on GitHub: ticked boxes, notes, screenshots, links. Change only what the new commits make stale.
 - End with the PR attribution lines your environment asks for, if any.
 
 ## 3. Push
@@ -70,15 +72,18 @@ force.
 ## 4. Create or update
 
 ```bash
-gh pr create --base <base> --head <branch> --title "<title>" --body-file <file>
+gh pr create --base <base> --head <branch> --title '<title>' --body-file <file>
 ```
 
-Add `--draft` when the user asks for a draft. With a PR already open, edit it only when its title or body should
-change:
+Put the title in single quotes, writing a `'` inside it as `'\''`: in double quotes, backticks and `$` in a title
+run as commands. Add `--draft` when the user asks for a draft. With a PR already open, edit it only when its title
+or body should change:
 
 ```bash
-gh pr edit <N> --title "<title>" --body-file <file>
+gh pr edit <N> --title '<title>' --body-file <file>
 ```
+
+Add `--base <branch>` to the edit only when the user named a base that differs from the PR's.
 
 ## 5. Report
 

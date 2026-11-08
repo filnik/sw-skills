@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import types
 from pathlib import Path
 
 TMP = Path(tempfile.mkdtemp(prefix="disk-cleanup-test.")).resolve()
@@ -111,6 +112,30 @@ def test_fence():
     assert "symlink" in dc.recheck(item)
     item = {**item, "path": str(r), "paths": [str(r / "src.js")]}
     assert not dc.fenced(item), "only build folders inside the checkout"
+
+
+def test_keep_file_in_xcode_and_gradle():
+    support = dc.XCODE / "iOS DeviceSupport"
+    write(support / "16.0" / dc.KEEP, "")
+    for name, ts in (("18.0", time.time()), ("17.0", OLD), ("16.0", OLD - 86400)):
+        write(support / name / "Symbols/x")
+        age(support / name, ts)
+    write(H / "code/droid/gradle/wrapper/gradle-wrapper.properties",
+          "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.5-bin.zip\n")
+    for name in ("gradle-8.5-bin", "gradle-7.0-bin", "gradle-6.0-bin"):
+        (dc.GRADLE / "wrapper/dists" / name).mkdir(parents=True)
+    write(dc.GRADLE / "wrapper/dists/gradle-6.0-bin" / dc.KEEP, "")
+
+    real = dc.subprocess
+    dc.subprocess = types.SimpleNamespace(run=lambda *a, **k: (_ for _ in ()).throw(OSError("no xcrun in tests")),
+                                          TimeoutExpired=subprocess.TimeoutExpired)
+    try:
+        xcode = [Path(i["path"]).name for i in dc.xcode_items(7)]
+    finally:
+        dc.subprocess = real
+    assert xcode == ["17.0"], xcode  # 18.0 is the newest, 16.0 is protected
+    gradle = [Path(i["path"]).name for i in dc.gradle_items([H / "code/droid"], 14)]
+    assert gradle == ["gradle-7.0-bin"], gradle
 
 
 def test_plan_expiry():

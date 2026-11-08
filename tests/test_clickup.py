@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Pure-logic tests for skills/pick/scripts/clickup.py. Run: python3 tests/test_clickup.py (exit 0 = green)."""
 import importlib.util
+import urllib.request
 from pathlib import Path
 
 path = Path(__file__).resolve().parents[1] / "skills" / "pick" / "scripts" / "clickup.py"
@@ -49,6 +50,30 @@ def test_format_task():
     assert "- shot.png (image/png) → /tmp/01-shot.png" in out
     assert out.index("ann, 2024-07-03: first") < out.index("bob, 2024-10-27: second"), out
     assert cu.task_line(task) == "abc · to do · Fix cart #bug · ann"
+
+
+def test_token_only_to_clickup():
+    assert cu.token_host("https://t9012345.p.clickup-attachments.com/a/shot.png")
+    assert cu.token_host("https://api.clickup.com/api/v2/task/abc")
+    assert not cu.token_host("https://evilclickup.com/x"), "a look-alike host gets no token"
+    assert not cu.token_host("https://clickup.com.evil.io/x")
+    assert not cu.token_host("https://s3.amazonaws.com/bucket/shot.png")
+
+    h = cu.DropAuthOnHostChange()
+    req = urllib.request.Request("https://api.clickup.com/x", headers={"Authorization": "tok"})
+    away = h.redirect_request(req, None, 302, "Found", {}, "https://elsewhere.example/y")
+    assert away.get_header("Authorization") is None, "a redirect to another host drops the token"
+    same = h.redirect_request(req, None, 302, "Found", {}, "https://api.clickup.com/z")
+    assert same.get_header("Authorization") == "tok"
+
+
+def test_search():
+    tasks = [{"name": "Cart total wrong"}, {"name": "Login fails"}, {"name": "Cart crash on checkout"},
+             {"name": "Checkout button"}]
+    assert [t["name"] for t in cu.search(tasks, "cart checkout")] == \
+        ["Cart crash on checkout", "Cart total wrong", "Checkout button"]
+    assert cu.search(tasks, "LOGIN") == [{"name": "Login fails"}]
+    assert cu.search(tasks, "payment") == []
 
 
 if __name__ == "__main__":

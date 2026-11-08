@@ -27,11 +27,14 @@ REVIEWS = "databaseId author{login} state body commit{oid}"
 COMMENTS = "databaseId author{login} body"
 THREADS = f"id isResolved isOutdated path line originalLine comments(first:100){{{PAGE} nodes{{{COMMENTS}}}}}"
 META = """query($owner:String!,$name:String!,$n:Int!){viewer{login} repository(owner:$owner,name:$name){pullRequest(number:$n){
-  title url state isDraft author{login} baseRefName headRefOid mergeable mergeStateStatus reviewDecision
+  title url state isDraft author{login} baseRefName headRefName headRefOid mergeable mergeStateStatus reviewDecision
   reviewRequests(first:20){nodes{requestedReviewer{... on Bot{login} ... on User{login}}}}
   commits(last:1){nodes{commit{statusCheckRollup{state contexts(first:100){nodes{__typename
     ... on CheckRun{name status conclusion detailsUrl isRequired(pullRequestNumber:$n)}
     ... on StatusContext{context state targetUrl isRequired(pullRequestNumber:$n)}}}}}}}}}}"""
+OURS = """query($owner:String!,$name:String!,$n:Int!){viewer{login}
+  repository(owner:$owner,name:$name){pullRequest(number:$n){author{login}}}}"""
+RESOLVE = "mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}"
 FAILED = ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE")
 PASSED = ("SUCCESS", "NEUTRAL", "SKIPPED")
 
@@ -142,8 +145,9 @@ def ci_lines(rollup):
         if state in PASSED:
             ok += 1
         elif state in FAILED:
-            job = re.search(r"/job/(\d+)", c.get("detailsUrl") or "")
-            how = f"gh run view --job {job.group(1)} --log-failed | tail -80" if job else (c.get("detailsUrl") or c.get("targetUrl") or "")
+            job = re.search(r"/runs/(\d+)/job/(\d+)", c.get("detailsUrl") or "")
+            how = (f"gh run view --job {job.group(2)} --log-failed | tail -80 · run {job.group(1)}" if job
+                   else (c.get("detailsUrl") or c.get("targetUrl") or ""))
             bad.append(f"         ✗ {'required' if c.get('isRequired') else 'optional'} {name} ({state.lower()}) → {how}")
         else:
             pending.append(name)
@@ -175,6 +179,21 @@ def build_items(threads, reviews, comments, ours):
     for c in comments:
         items.append((f"ic{c['databaseId']}", login(c), "PR comment", clean(c["body"]), []))
     return items, resolved
+
+
+def handled(item, seen, ours):
+    """Answered by an `answer` run and, for a thread, nobody has written in it since: a reply after ours reopens it."""
+    id_, who, _, _, replies = item
+    if id_ not in seen:
+        return False
+    return not id_.startswith("c") or (replies[-1][0] if replies else who) in ours
+
+
+def already_answered(id_, thread_comments, seen, ours):
+    """An `answer` run posted this reply before (the thread's last word is ours): a rerun must not post it twice."""
+    if not id_.startswith("c"):
+        return id_ in seen
+    return id_ in seen and bool(thread_comments) and login(thread_comments[-1]) in ours
 
 
 def copilot_line(reviews, requests, head):
@@ -212,7 +231,7 @@ def status(args):
     state_file, seen, shown = load_state(owner, name, n)
     head = pr["headRefOid"]
     print(f"pr       #{n} {pr['state']}{' draft' if pr['isDraft'] else ''} · {pr['title']}")
-    print(f"         {pr['url']} · base {pr['baseRefName']} · head {head[:10]}")
+    print(f"         {pr['url']} · base {pr['baseRefName']} · head {pr['headRefName']} {head[:10]}")
     print(f"merge    {pr['mergeable']} / {pr['mergeStateStatus']} · review {pr['reviewDecision'] or 'none'}")
     commit = pr["commits"]["nodes"][0]["commit"] if pr["commits"]["nodes"] else {}
     checks = ci_lines(commit.get("statusCheckRollup"))
@@ -222,8 +241,8 @@ def status(args):
         print(copilot)
 
     # Only an answer marks an item handled; being shown leaves it to triage.
-    earlier = [i for i in items if i[0] in seen]
-    items = [i for i in items if i[0] not in seen]
+    earlier = [i for i in items if handled(i, seen, ours)]
+    items = [i for i in items if not handled(i, seen, ours)]
     handled_threads = [i for i in earlier if i[0].startswith("c")]
     print(f"comments {len(items)} to triage · {sum(i[1] in ours for i in items)} of them yours to exclude"
           f" · {len(handled_threads)} threads answered but open"
@@ -238,7 +257,8 @@ def status(args):
             tail = f" [{len(replies)} replies, last {replies[-1][0]}]" if replies else ""
             print(f"{id_}  yours · {who} · {where} — {one_line(body, 90)}{tail}")
         else:
-            print_item(id_, "shown" if id_ in shown else "NEW", who, where, body, replies, ours)
+            mark = "NEW REPLY" if id_ in seen else "shown" if id_ in shown else "NEW"
+            print_item(id_, mark, who, where, body, replies, ours)
         shown.add(id_)
     for id_, who, where, body, replies in (earlier if args.full else handled_threads):
         if args.full:
@@ -253,13 +273,15 @@ def status(args):
 def answer(args):
     owner, name, n = target(args.pr)
     answers = json.loads(Path(args.file).read_text())
+    who = graphql(OURS, owner=owner, name=name, n=n)
+    ours = {who["viewer"]["login"], login(who["repository"]["pullRequest"])}
     threads = review_threads(owner, name, n)
     state_file, seen, shown = load_state(owner, name, n)
     by_comment = {}
     for t in threads:
         ids = [c["databaseId"] for c in t["comments"]["nodes"]]
         for i in ids:
-            by_comment[i] = (t["id"], ids[0])  # replies go to the thread's first comment
+            by_comment[i] = (t, ids[0])  # replies go to the thread's first comment
     grouped = []
     for a in answers:
         id_, body = a["id"], a["body"].strip()
@@ -268,17 +290,25 @@ def answer(args):
             if not thread:
                 print(f"{id_}  ✗ no such thread")
                 continue
+            resolve = a.get("resolve", True) and not thread["isResolved"]
+            if already_answered(f"c{top}", thread["comments"]["nodes"], seen, ours):
+                if resolve and not args.dry_run:
+                    graphql(RESOLVE, t=thread["id"])
+                print(f"{id_}  already answered, skipped{' · resolved now' if resolve else ''}")
+                continue
             if args.dry_run:
-                print(f"{id_}  would reply{' and resolve' if a.get('resolve', True) else ''}: {one_line(body)}")
+                print(f"{id_}  would reply{' and resolve' if resolve else ''}: {one_line(body)}")
                 continue
             gh("api", "-X", "POST", f"repos/{owner}/{name}/pulls/{n}/comments/{top}/replies", "-f", f"body={body}")
             seen.update((id_, f"c{top}"))
             save_state(state_file, seen, shown)
             done = "replied"
-            if a.get("resolve", True):
-                graphql("mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}", t=thread)
+            if resolve:
+                graphql(RESOLVE, t=thread["id"])
                 done += " · resolved"
             print(f"{id_}  {done}")
+        elif already_answered(id_, [], seen, ours):
+            print(f"{id_}  already answered, skipped")
         else:
             grouped.append((id_, body))
     if grouped:

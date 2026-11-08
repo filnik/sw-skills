@@ -2,8 +2,10 @@
 """ClickUp for the pick and ticket skills: read, list, take and create tasks. Stdlib only.
 
     clickup.py get <id|url> [--download DIR]    the task, its comments and attachments (downloaded to DIR)
-    clickup.py list [--tag T] [--status S] [--mine] [--list ID]
-                                                the open tasks of the project's list, one line each
+    clickup.py list [--tag T] [--status S] [--mine] [--list ID] [--closed] [--search WORDS] [--limit N]
+                                                the open tasks of the project's list, one line each; --closed
+                                                adds the closed ones, --search keeps the tasks whose name has
+                                                any of the words (most matches first), --limit (default 30)
     clickup.py start <id|url> [--status S]      assign it to you and move it to an in-progress status
     clickup.py create --title T --body-file F [--tag T]... [--status S] [--list ID]
 
@@ -26,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 API = "https://api.clickup.com/api/v2"
+TOKEN_HOSTS = ("clickup.com", "clickup-attachments.com")  # the only hosts the token is ever sent to
 IN_PROGRESS = re.compile(r"progress|doing|develop|working|started", re.I)
 
 
@@ -120,9 +123,35 @@ def format_task(t, comments, files=None):
     return "\n".join(lines)
 
 
+def token_host(url):
+    """True when url points at ClickUp itself, so the token may go with it."""
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    return any(host == h or host.endswith("." + h) for h in TOKEN_HOSTS)
+
+
+class DropAuthOnHostChange(urllib.request.HTTPRedirectHandler):
+    """urllib copies every header onto a redirect, whatever the new host: the token must not follow it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        moved = urllib.parse.urlparse(newurl).hostname != urllib.parse.urlparse(req.full_url).hostname
+        if new is not None and moved:
+            new.remove_header("Authorization")
+        return new
+
+
+def search(tasks, words):
+    """The tasks whose name has any of the words (case-insensitive), the ones matching most words first."""
+    words = [w.lower() for w in words.split() if w]
+    scored = [(sum(w in t.get("name", "").lower() for w in words), i, t) for i, t in enumerate(tasks)]
+    return [t for n, i, t in sorted(scored, key=lambda x: (-x[0], x[1])) if n]
+
+
 def download(tok, attachments, outdir):
-    """Save each attachment in outdir; {attachment id: local path, or the failure and the URL}."""
+    """Save each attachment in outdir; {attachment id: local path, or the failure and the URL}.
+    The token goes only to ClickUp's own hosts, and is dropped on a redirect to another host."""
     outdir.mkdir(parents=True, exist_ok=True)
+    opener = urllib.request.build_opener(DropAuthOnHostChange)
     saved = {}
     for i, a in enumerate(attachments, 1):
         if not a.get("url"):
@@ -130,8 +159,8 @@ def download(tok, attachments, outdir):
         safe = re.sub(r"[^\w.-]", "_", a.get("title") or "attachment")
         path = outdir / f"{i:02d}-{safe}"
         try:
-            req = urllib.request.Request(a["url"], headers={"Authorization": tok})
-            with urllib.request.urlopen(req, timeout=60) as r:
+            req = urllib.request.Request(a["url"], headers={"Authorization": tok} if token_host(a["url"]) else {})
+            with opener.open(req, timeout=60) as r:
                 path.write_bytes(r.read())
             saved[a.get("id")] = str(path)
         except (urllib.error.URLError, OSError) as e:
@@ -161,6 +190,9 @@ def main():
     ls.add_argument("--status")
     ls.add_argument("--mine", action="store_true")
     ls.add_argument("--list")
+    ls.add_argument("--closed", action="store_true")
+    ls.add_argument("--search", metavar="WORDS")
+    ls.add_argument("--limit", type=int, default=30)
     st = sub.add_parser("start")
     st.add_argument("ref")
     st.add_argument("--status")
@@ -187,7 +219,7 @@ def main():
 
     elif args.cmd == "list":
         lid = list_id_of(cfg, args.list)
-        params = {"include_closed": "false", "subtasks": "true"}
+        params = {"include_closed": "true" if args.closed else "false", "subtasks": "true"}
         if args.tag:
             params["tags[]"] = [args.tag]
         if args.status:
@@ -201,8 +233,13 @@ def main():
             if data.get("last_page", True) or not data.get("tasks"):
                 break
             page += 1
-        print(f"{len(tasks)} open tasks in list {lid}")
-        for t in tasks:
+        if args.search:
+            tasks = search(tasks, args.search)
+        kind = "tasks" if args.closed else "open tasks"
+        what = f' matching "{args.search}"' if args.search else ""
+        shown = f" (the first {args.limit})" if len(tasks) > args.limit else ""
+        print(f"{len(tasks)} {kind}{what} in list {lid}{shown}")
+        for t in tasks[:args.limit]:
             print(task_line(t))
 
     elif args.cmd == "start":
