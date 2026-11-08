@@ -1,6 +1,6 @@
 ---
 name: recap
-description: Says where the work stands, in plain words - what is done (with the evidence), what is still open, and what the user has to decide, with a recommendation for each decision - plus the state of the branch, of the work not committed or not pushed, and of the pull request. Read-only. Use for "/recap", "recap", "where are we", "what's left", "summarize", "fammi un recap", "dove siamo", "cosa resta aperto", "cosa devo decidere", "riassumi". Not for a changelog or release notes.
+description: Says where the work stands, in plain words - what is done (with the evidence), what is still open, and what the user has to decide, with a recommendation for each decision - plus the state of the branch, of the work not committed or not pushed, and of the pull request. Read-only. Use for "/recap", "recap", "where are we", "what's left", "summarize where we are", "fammi un recap", "dove siamo", "cosa resta aperto", "cosa devo decidere", "riassumi dove siamo". Not for release notes (the release-notes skill), yesterday's work (the standup skill), all open PRs (the my-prs skill), or summarizing a file, PR or page.
 ---
 
 # recap

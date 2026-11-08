@@ -1,11 +1,12 @@
 ---
 name: history
-description: Answers questions about the history of the code with git and gh - when and by which commit or PR a line, function or behaviour was introduced or changed, which release first shipped a fix, whether a change is already on a release branch or in a tag, what changed in an area between two versions, who knows a piece of code. Every answer comes with its evidence (commit, date, PR, tag). Read-only. Use for "/history", "when was this introduced", "which release has this fix", "was this already in 1.4?", "what changed between v2.0 and v2.1", "who wrote this", "quando è stato introdotto", "in che release è finita la fix", "c'era già nella 1.4?", "cosa è cambiato tra", "chi ha scritto questa parte". Not for whether a bug has an issue (search the tracker) or why the CI is red (ci-why).
+description: Answers questions about the history of the code with git and gh - when and by which commit or PR a line, function or behaviour was introduced or changed, which release first shipped a fix, whether a change is already on a release branch or in a tag, what changed in an area between two versions, who knows a piece of code. Every answer comes with its evidence (commit, date, PR, tag). Read-only. Use for "/history", "when was this introduced", "which release has this fix", "was this already in 1.4?", "what changed in <area> between v2.0 and v2.1", "who wrote this", "quando è stato introdotto", "in che release è finita la fix", "c'era già nella 1.4?", "cosa è cambiato tra", "chi ha scritto questa parte". Not for whether a bug has an issue (search the tracker), why the CI is red (ci-why), a release's full notes (the release-notes skill) or a library's changes (the research skill).
 ---
 
 # history
 
-Read-only: `git fetch` is the only command that changes anything, and it touches only the remote-tracking refs.
+Read-only: `git fetch` is the only write. It updates the remote-tracking refs and the tags and, for a shallow
+clone, the history; never the branches or the working tree.
 
 ## 1. Up to date and complete
 
@@ -14,8 +15,16 @@ git fetch --tags --quiet origin
 git rev-parse --is-shallow-repository
 ```
 
-A shallow clone (`true`) has no history before its cut: say so, and fetch the rest with `git fetch --unshallow`
-before answering.
+If the fetch fails (no `origin`, offline, auth or sandbox denial), go on with the local refs and say the answer
+may miss recent remote work.
+
+A shallow clone (`true`) has no history before its cut. Tell the user, since the rest of the history is a
+download, then fetch it with `git fetch --unshallow` before answering; if they would rather not, answer from what
+is there and say where the cut is.
+
+A version the user names ("1.4") may be several refs (`v1.4.0`, `1.4`, `release/1.4`): resolve it with
+`git tag -l '*<version>*'` and `git branch -r --list '*<version>*'`. Several matches: ask which one, or answer for
+each.
 
 ## 2. The question, the commands
 
@@ -47,8 +56,9 @@ before answering.
   `git log --oneline --no-merges <from>..<to> -- <path>` for one area;
 - the size: `git diff --stat <from> <to> -- <path>`.
 
-**Who knows this code**: `git shortlog -sne --no-merges --since=<1 year ago> -- <path>`, the people who changed it
-lately; the oldest author is often no longer the right person to ask.
+**Who knows this code**: `git shortlog -sne --no-merges --since=<1 year ago> HEAD -- <path>`, the people who changed
+it lately; the oldest author is often no longer the right person to ask. Keep the `HEAD`: without a revision,
+shortlog reads stdin when it is not a terminal and prints nothing.
 
 ## 3. Answer
 

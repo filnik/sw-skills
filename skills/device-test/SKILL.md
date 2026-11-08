@@ -51,8 +51,11 @@ command uses are needed:
    the `device-tester` agent (`dev:device-tester` once this plugin is installed) with the plan below. It runs on
    Sonnet with its own context, so the phone output never fills this one.
 2. Claude may run the read-only commands itself: `devices`, `lease status`, `report`, `flows`, `build-info`.
-3. A phone leased by another session: ask the user before taking it. A phone that is not connected: devtest posts a
-   macOS notification asking to plug it in and waits up to 5 min (`DEVTEST_PLUG_WAIT`, `0` fails at once).
+   `build-info` waits for a phone that is not plugged in: give that Bash call a timeout above 300000.
+3. A phone leased by another session: ask the user before taking it. When the user agrees, release it yourself,
+   `python3 <tool> --device <alias> lease release --force`, then delegate: the agent never forces a lease. A phone
+   that is not connected: devtest posts a macOS notification asking to plug it in and waits up to 5 min
+   (`DEVTEST_PLUG_WAIT`, `0` fails at once).
 
 ## Test plan (main session → agent)
 
@@ -62,6 +65,7 @@ BLOCKED with the reason, never swapped for another.
 
 ```
 Ticket: <id> · <title>
+Plan file: <absolute path of this file>
 Tool: python3 <absolute path of ${CLAUDE_SKILL_DIR}/scripts/devtest.py>
 Worktree: <path under test> · red proof on: <base build or worktree | none>
 Phones: <aliases> · owner: device-tester-<id>
@@ -73,7 +77,8 @@ Checks (one per line, keep the IDs):
 Not to test: <what and why>
 ```
 
-- The `Tool:` line carries the substituted path: an agent body does not get `${CLAUDE_SKILL_DIR}`.
+- The `Tool:` line carries the substituted path: an agent body does not get `${CLAUDE_SKILL_DIR}`. The `Plan file:`
+  line is the path the agent passes to `devtest new`.
 - Every check names its evidence. One a phone cannot observe is `N/A on ios (why)` or goes under "Not to test".
 - A rerun is a plan too: scenario, phones, worktree, and the checks (`--only AC2,AC3`) if not all.
 - The same checks on several phones are one plan: the agent runs them side by side in one call.

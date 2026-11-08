@@ -5,14 +5,19 @@ description: Turns a problem or a request into a well-written issue on GitHub Is
 
 # ticket
 
-Invoking this skill is the user's ok to create one issue. Ask first only when the request is open (one issue or two,
-which of two scopes) or a likely duplicate turns up. A change after creation is an edit of the issue.
+If the user asked for an issue in their own words (`/dev:ticket`, "open an issue", "file a bug"), that is the ok to
+create one. If you chose this skill yourself or another skill handed over (e.g. crashes), show the title and body
+and wait for an ok. Ask first also when the request is open (one issue or two, which of two scopes) or a likely
+duplicate turns up. A change after creation is an edit of the issue.
 
 ## 1. The tracker
 
 ClickUp when the user says so or the project has a `clickup` block in `.claude/config/project.json`; otherwise
 GitHub Issues, through `gh`. ClickUp goes through the pick skill's script, installed next to this skill:
 `python3 "${CLAUDE_SKILL_DIR}/../pick/scripts/clickup.py"` (written `clickup.py` below).
+
+When `gh` or `clickup.py` fails (not installed, not logged in, no token, 401/403/404), show its message and stop.
+Never ask for a token in the chat.
 
 ## 2. Understand it
 
@@ -25,7 +30,8 @@ GitHub Issues, through `gh`. ClickUp goes through the pick skill's script, insta
 ## 3. Duplicates
 
 - GitHub: `gh issue list --state all --search "<2-3 distinctive words>" --limit 10`.
-- ClickUp: `clickup.py list`, then look for the same subject among the names.
+- ClickUp: `clickup.py list --closed --search "<2-3 distinctive words>"`, closed tasks included, the closest
+  names first.
 
 A likely duplicate: show it and ask whether to comment on it instead, or create the new one anyway.
 
@@ -53,7 +59,7 @@ A likely duplicate: show it and ask whether to comment on it instead, or create 
   ```
 
   Add links (a design, a log, a related issue) where there are some. Leave out a section only when there is truly
-  nothing to put in it.
+  nothing to put in it. Never copy tokens, keys, personal data or internal hostnames from logs into the body.
 
 ## 5. Create it
 

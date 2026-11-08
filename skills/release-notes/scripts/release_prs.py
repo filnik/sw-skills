@@ -85,8 +85,12 @@ def main():
     if len(args) > 2 or any(a.startswith("-") for a in args):
         sys.exit(__doc__.strip())
     to = args[1] if len(args) == 2 else "HEAD"
-    frm = args[0] if args else previous_tag(to)
-    log = run("git", "log", "--first-parent", "--format=%h%x1f%s%x1f%an", f"{frm}..{to}")
+    try:
+        frm = args[0] if args else previous_tag(to)
+        log = run("git", "log", "--first-parent", "--format=%h%x1f%s%x1f%an", f"{frm}..{to}")
+    except RuntimeError as e:
+        sys.exit(f"cannot read {args[0] if args else 'the latest tag'}..{to} ({e}): FROM and TO must be existing tags "
+                 "or commits. A version not tagged yet is not one: run with no arguments.")
     commits = [line.split("\x1f") for line in log.splitlines() if line]
     numbers = sorted({n for _, s, _ in commits for n in [pr_number(s)] if n})
     try:

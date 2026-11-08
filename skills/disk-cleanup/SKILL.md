@@ -18,7 +18,8 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/disk_cleanup.py" scan
 It takes a minute or two (it measures every candidate) and works inside the sandbox. Options: `--roots ~/work,~/oss`
 (folders under home holding the checkouts; default the existing ones of ~/Documents, ~/Developer, ~/Projects,
 ~/code, ~/src, ~/dev), `--days 14` (how long a checkout must be untouched), `--derived-days 7`, `--cache-hours 24`.
-The last line names the plan file: keep it for step 3. A plan older than 24 hours is refused.
+The last line names the plan file: keep it for step 3. Each scan writes a new plan, named with its time. A plan
+older than 24 hours is refused.
 
 What it proposes, section by section:
 
@@ -47,16 +48,21 @@ to delete, offering:
 For a ⚠ row, say what is lost: an Xcode archive is needed to symbolicate that build's crashes; a file in Downloads
 may be the only copy. Never pick for the user, and never turn "clean it up" into ⚠ rows.
 
+The numbers belong to the report just shown, with its plan file. After any new scan, show the new report and ask
+again: never apply numbers the user picked from an earlier one. A range (`7-12`) that covers ⚠ rows: name each of
+them and get a yes for each before cleaning.
+
 To protect something for good, the user puts a `.disk-cleanup-keep` file in the folder: empty, it protects the
 folder and everything under it; with patterns (one per line, `#` for comments, e.g. `*.mov`), only the matching
 entries below it. The scan never proposes them, and clean refuses them and any folder that holds a keep file
-deeper down.
+deeper down. A keep file cannot protect the package caches or Docker: their own commands empty them.
 
 ## 3. Clean
 
 Clean must run **outside the Claude Code sandbox** (Bash with `dangerouslyDisableSandbox: true`): it deletes outside
 the working directory, and it reads the running processes so it can skip what a build or a Gradle daemon is using.
-Inside the sandbox those rows are skipped with "cannot read the running processes".
+Inside the sandbox those rows are skipped with "cannot read the running processes", so `--dry-run` runs outside it
+too. That call asks the user: declined, stop and say nothing was deleted. Never fall back to `rm` or another route.
 
 ```bash
 python3 "${CLAUDE_SKILL_DIR}/scripts/disk_cleanup.py" clean --plan <plan file> --ids 1,4,7-12

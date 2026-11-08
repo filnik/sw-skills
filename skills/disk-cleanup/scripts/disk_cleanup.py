@@ -317,6 +317,8 @@ def cmd_item(cat, tool, measured, reason, auto=True, size=None):
 
 def xcode_items(derived_days):
     for d in subdirs(DERIVED):
+        if kept(d):
+            continue
         ws, last = derived_info(d)
         if ws and not Path(ws).exists():
             why = "its project is gone"
@@ -327,7 +329,9 @@ def xcode_items(derived_days):
         yield dir_item("xcode", d, f"DerivedData · {why} · the next build makes it again", last_access=last)
     for kind in sorted(XCODE.glob("*DeviceSupport")) if XCODE.is_dir() else []:
         for d in sorted(subdirs(kind), key=mtime, reverse=True)[1:]:  # the newest is the device in use
-            yield dir_item("xcode", d, f"{kind.name} · older OS · Xcode copies it again when such a device connects")
+            if not kept(d):
+                yield dir_item("xcode", d,
+                               f"{kind.name} · older OS · Xcode copies it again when such a device connects")
     try:
         r = subprocess.run(["xcrun", "simctl", "list", "devices", "-j"], capture_output=True, text=True, timeout=30)
         devices = json.loads(r.stdout).get("devices", {})
@@ -350,14 +354,14 @@ def gradle_items(checkouts, days):
         return
     for d in subdirs(GRADLE / "wrapper/dists"):
         v = re.sub(r"^gradle-|-(bin|all)$", "", d.name)
-        if d.name.startswith("gradle-") and v not in used:
+        if d.name.startswith("gradle-") and v not in used and not kept(d):
             yield dir_item("gradle", d, f"Gradle {v} · no scanned project uses it · downloaded again if needed")
     for parent in ("caches", "daemon"):
         for d in subdirs(GRADLE / parent):
-            if d.name[:1].isdigit() and d.name not in used:
+            if d.name[:1].isdigit() and d.name not in used and not kept(d):
                 yield dir_item("gradle", d, f"{parent} of Gradle {d.name} · no scanned project uses it")
     cache = GRADLE / "caches/build-cache-1"
-    if cache.is_dir() and idle_days(mtime(cache)) >= days:
+    if cache.is_dir() and idle_days(mtime(cache)) >= days and not kept(cache):
         yield dir_item("gradle", cache, "Gradle build cache · made again by the next builds")
 
 
@@ -677,7 +681,8 @@ def main():
     s.add_argument("--days", type=at_least_one, default=14, help="days a checkout must be untouched")
     s.add_argument("--derived-days", type=at_least_one, default=7, help="days a DerivedData folder must be unused")
     s.add_argument("--cache-hours", type=at_least_one, default=24, help="hours a ~/Library/Caches entry must be unused")
-    s.add_argument("--plan", default=str(Path(os.environ.get("TMPDIR", "/tmp")) / "disk-cleanup-plan.json"))
+    s.add_argument("--plan", default=str(Path(os.environ.get("TMPDIR", "/tmp")) /
+                                         time.strftime("disk-cleanup-plan-%Y%m%d-%H%M%S.json")))
     c = sub.add_parser("clean", help="delete items of the plan, re-checking each one")
     c.add_argument("--plan", required=True)
     pick = c.add_mutually_exclusive_group(required=True)

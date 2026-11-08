@@ -5,8 +5,10 @@ description: Brings the base branch into the current branch and resolves the con
 
 # merge
 
-Invoking this skill is the user's ok for its git writes: the merge, its commit and the push. They go only through
-`scripts/merge.sh`, next to this file. Run it from the repository, or pass `-C <dir>` right after the script path.
+If the user asked for this in their own words (`/dev:merge`, or "merge main" in this turn), that is the ok, once,
+for its git writes: the merge, its commit and the push. If you chose this skill yourself or another skill handed
+over, say what you would merge into what and wait for an ok. The writes go only through `scripts/merge.sh`, next to
+this file. Run it from the repository, or pass `-C <dir>` right after the script path.
 
 ## 1. Start
 
@@ -17,7 +19,9 @@ bash "${CLAUDE_SKILL_DIR}/scripts/merge.sh" start [TARGET]
 TARGET only when the user names one. The script:
 
 - refuses uncommitted changes, a detached HEAD and a merge already in progress;
-- picks the target: the named branch, else the base of the branch's PR (via `gh`), else origin's default branch;
+- picks the target: the named branch, else the base of the branch's PR (via `gh`), else origin's default branch
+  when `gh` says there is no PR. When `gh` fails (missing, logged out, offline) it stops: ask the user for the
+  target, never assume the default branch;
 - fast-forwards the local branch to `origin/<branch>` when the remote is ahead, and stops when they diverged;
 - merges `origin/<target>` without committing.
 
@@ -60,7 +64,13 @@ One `--trailer` per commit attribution line your environment asks for, if any. T
 markers, stages the resolution, commits `Merge <target> into <branch>` and pushes to `origin/<branch>`. It never
 force-pushes.
 
-`bash "${CLAUDE_SKILL_DIR}/scripts/merge.sh" abort` drops the merge in progress: the branch goes back to where `start` found it.
+If finish says the push failed, stop: the merge commit exists only locally. Rejected because `origin/<branch>` got
+new commits: with the user's ok, `git pull --no-rebase`, then `git push origin HEAD:<branch>`; never `--rebase`,
+which would flatten the merge commit. Denied by a hook or a permission rule: give the user
+`! git push origin HEAD:<branch>`.
+
+`bash "${CLAUDE_SKILL_DIR}/scripts/merge.sh" abort` drops the merge in progress: the branch goes back to where it was
+before the merge. A fast-forward to `origin/<branch>` that `start` made stays.
 
 ## Report
 

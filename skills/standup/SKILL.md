@@ -24,7 +24,9 @@ git -C <repo> log --all --no-merges --since=<since> --author="$(git -C <repo> co
   --format='%h %ad %s' --date=format:'%a %H:%M'
 ```
 
-**GitHub** (needs `gh`, logged in):
+If `git -C <repo> config user.email` is empty, skip that repo and say so: an empty `--author` matches every author.
+
+**GitHub** (needs `gh`, logged in; without it, write from the commits and say GitHub was skipped):
 
 ```bash
 gh search prs --author @me --created ">=<since>" --json repository,number,title,url,state,isDraft

@@ -12,7 +12,9 @@ git config --global user.name test
 git config --global user.email test@example.com
 git config --global init.defaultBranch main
 mkdir "$tmp/fakebin"
-printf '#!/bin/sh\nexit 1\n' > "$tmp/fakebin/gh"
+no_pr() { printf '#!/bin/sh\necho "no pull requests found for branch \\"feature\\"" >&2\nexit 1\n' > "$tmp/fakebin/gh"; }
+gh_down() { printf '#!/bin/sh\necho "HTTP 401: Bad credentials" >&2\nexit 1\n' > "$tmp/fakebin/gh"; }
+no_pr
 chmod +x "$tmp/fakebin/gh"
 export PATH="$tmp/fakebin:$PATH"
 
@@ -38,6 +40,14 @@ echo dirty >> "$tmp/me/file.txt"
 out=$("$merge" -C "$tmp/me" start 2>&1) && fail "start accepted uncommitted changes"
 expect "uncommitted changes" "$out"
 git -C "$tmp/me" checkout -q file.txt
+
+# A gh that fails for another reason says nothing about the PR: start stops instead of guessing the default branch.
+gh_down
+out=$("$merge" -C "$tmp/me" start 2>&1) && fail "start guessed a target while gh was failing"
+expect "name the target" "$out"
+expect "Bad credentials" "$out"
+git -C "$tmp/me" rev-parse -q --verify MERGE_HEAD >/dev/null && fail "start began a merge while gh was failing"
+no_pr
 
 # A conflict stops at start; finish refuses the markers.
 out=$("$merge" -C "$tmp/me" start 2>&1)
