@@ -21,6 +21,7 @@ reading the history, checking production crashes, and knowing where you are.
 | `/dev:crashes` | The crashes of a release from Crashlytics or Sentry, new or worse than the previous version, with the code they point to. | nothing |
 | `/dev:release-notes` | The release notes of a version from every PR merged since the last tag, written for users, in the repo's changelog format. | on your ok |
 | `/dev:disk-cleanup` | Finds regenerable build output in idle projects, stale Xcode and Gradle data and caches, shows a numbered report, deletes only what you pick after re-checking each item. | what you pick |
+| `/dev:memguard` | Installs a background guard that kills a command started by Claude Code or Codex when its memory explodes (20 GB and still growing fast, or 30 GB), before the Mac freezes; tells you what it killed. macOS. | a LaunchAgent, on install |
 | `/dev:device-test` | Tests your app on real phones (Android via adb, iPhone via WebDriverAgent): a scenario runs whole in one call, one line per step, one verdict. Claude writes the plan, the `device-tester` agent runs it. | scenarios in `device-tests/` |
 
 You don't have to type the commands: "pick the next bug", "open an issue for this", "search online how to…",
@@ -112,6 +113,32 @@ table, so the phone output never fills your session.
 Requirements: `adb` for Android; for an iPhone, Xcode and the WebDriverAgent sources
 (`npm install --prefix ~/.cache/devtest/ios/wda-src appium-webdriveragent`).
 
+## Customizing disk-cleanup
+
+Without touching code:
+
+- `--roots ~/work,~/oss` says where your checkouts live; `--days`, `--derived-days` and `--cache-hours` say how long
+  things must sit unused. You can just ask: "scan ~/work too", "only checkouts idle for a month".
+- A `.disk-cleanup-keep` file protects a folder for good: empty, the whole folder; with patterns (`*.mov`, one per
+  line), only what matches below it.
+
+The lists at the top of `skills/disk-cleanup/scripts/disk_cleanup.py`:
+
+- `BUILD_DIRS`: the ignored build folders deleted in idle checkouts (add `.svelte-kit`, `.angular`, …);
+- `DEFAULT_ROOTS`: the folders under home searched for checkouts when `--roots` is not given;
+- `CACHE_SKIP`: `~/Library/Caches` entries never proposed;
+- `LOOSE`: the folders searched for files of 1 GB or more;
+- `TOOLS`: package managers emptied by their own command (command, folders measured, label).
+
+A rule of your own (old screen recordings, a project's generated assets, …) takes three pieces: a function that
+returns its items with `dir_item(...)`, like `look_items()`; its entry in `SECTIONS`; and a branch in `fenced()`
+saying where that section may delete. `clean` refuses anything outside its section's fence, whatever the plan file
+says, so a section without a fence deletes nothing. Add a case to `tests/test_disk_cleanup.py`.
+
+To keep your version apart from plugin updates, copy `skills/disk-cleanup/` to `~/.claude/skills/disk-cleanup/` and
+change it there: it becomes `/disk-cleanup`, next to `/dev:disk-cleanup`. Claude can make the change for you: "add
+a disk-cleanup section for screen recordings older than 30 days in ~/Movies".
+
 ## How the skills are built
 
 - **Scripts do the mechanical part, the model does the judgment.** Collecting every review comment across pages,
@@ -119,7 +146,9 @@ Requirements: `adb` for Android; for an iPhone, Xcode and the WebDriverAgent sou
   skill (`skills/<name>/scripts/`). Deciding whether a comment is a real bug is not: that stays in the instructions.
 - **Nothing is written without a clear ok.** Invoking `commit-push`, `merge` or `ticket` is the ok for their own
   writes. `release-notes` shows its draft and writes the changelog or a draft release only when you say so.
-  `disk-cleanup` deletes only the numbers you pick, and re-checks each one right before. `pick` writes nothing
+  `disk-cleanup` deletes only the numbers you pick, and re-checks each one right before. `memguard` installs its
+  LaunchAgent only when asked; from then on it kills by itself, by design, but only agent-launched processes past
+  its thresholds, and logs each kill. `pick` writes nothing
   until you approve its plan. `babysit` stops after its report and changes nothing until you answer. `ci-why`, `research`, `recap`, `my-prs`, `history`, `standup` and `crashes` are read-only.
 - **Never force.** No `--force`, no `--no-verify`, no rebase of a shared branch.
 - **Plain words.** Reports explain what happens to the user or the data, not just which line changes.
@@ -136,6 +165,7 @@ skills/my-prs/scripts/my_prs.py            your open PRs and their next step, on
 skills/release-notes/scripts/release_prs.py  the PRs between two tags, grouped, batched GraphQL (Python, stdlib only)
 skills/device-test/scripts/devtest*.py     the phone test runner: drivers, scenarios, leases (Python, stdlib only)
 skills/disk-cleanup/scripts/disk_cleanup.py  scan, numbered plan, re-checked deletion (Python, stdlib only)
+skills/memguard/scripts/memguard.py        the memory guard (Python, stdlib only); install.sh runs it as a LaunchAgent
 agents/device-tester.md                    the agent that runs device-test plans
 tests/                                     one test file per script
 ```
@@ -144,7 +174,7 @@ tests/                                     one test file per script
 
 ```bash
 claude plugin validate .
-python3 tests/test_babysit.py && python3 tests/test_clickup.py && python3 tests/test_my_prs.py && python3 tests/test_release_notes.py && python3 tests/test_disk_cleanup.py && bash tests/test_merge.sh
+python3 tests/test_babysit.py && python3 tests/test_clickup.py && python3 tests/test_my_prs.py && python3 tests/test_release_notes.py && python3 tests/test_disk_cleanup.py && python3 tests/test_memguard.py && bash tests/test_merge.sh
 for t in tests/test_devtest_*.py; do python3 "$t"; done
 claude plugin marketplace add ./      # try it locally without going through GitHub
 ```

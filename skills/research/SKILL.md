@@ -1,9 +1,17 @@
 ---
 name: research
-description: Online research for a development question, checked against the project's real versions - best practices, library and platform docs, release notes and breaking changes, migration guides, known bugs, how others solved the same problem. Reads the versions from the repo, searches several sources in parallel, opens the ones that decide the answer, and returns a recommendation with the sources and their dates, flagging anything written for another version. Read-only on the code. Use for "/research", "search online", "what's the best way to…", "is this a known bug?", "what changes in <library> X?", "how do I migrate to…", "cerca online", "fai una ricerca", "ci sono best practice per…", "è un bug noto?". Not for questions about the project's own code (read the repo) or this repo's own history (the history skill).
+description: Online research for a development question, checked against the project's real versions - best practices, library and platform docs, release notes and breaking changes, migration guides, known bugs, how others solved the same problem. Reads the versions from the repo, searches several sources in parallel, opens the ones that decide the answer, and returns a recommendation with the sources and their dates, flagging anything written for another version. Read-only on the code. Use for "/research", "search online", "what's the best way to…", "is this a known bug?", "what changes in <library> X?", "how do I migrate to…", "cerca online", "fai una ricerca", "ci sono best practice per…", "è un bug noto?". Not for questions about the project's own code (read the repo) or this repo's own history (the history skill). Runs in a subagent that does not see the conversation: pass the whole question, with what it is for, as the argument.
+context: fork
+agent: general-purpose
+background: false
 ---
 
 # research
+
+The question: $ARGUMENTS
+
+You run in a subagent: you see this text and the question above, not the conversation, and you cannot ask the user
+anything. When you need the user, end with questions instead (step 1); the main conversation asks them.
 
 ```
 question → the project's versions → search → read the sources → check → answer
@@ -18,7 +26,17 @@ with `curl` instead.
 ## 1. The question
 
 Put it in one sentence, with the decision it serves ("which auth library for a Next.js 15 app with Supabase").
-Too vague to search: ask one question first.
+
+No question, too vague to search, or it hinges on something only the user knows (which of two goals, a constraint):
+search nothing and return only this:
+
+```
+Questions for the user:
+1. <question> (<what the answer changes>)
+Ask the user, then run the research skill again with the question and the answers.
+```
+
+At most three questions. A choice the sources can settle is not a question for the user: research it.
 
 ## 2. The project's versions
 
@@ -50,7 +68,7 @@ date and the version it talks about.
 
 ## 6. Answer
 
-In the user's language:
+In the language of the question:
 
 1. **The answer**, in one to three lines, with the recommendation.
 2. **Options**, when there are more than one: pros and cons for this project, not in general.
@@ -58,4 +76,4 @@ In the user's language:
 4. **Sources**: links, each with its date.
 5. **Unsure**: what is still unclear, and the quickest way to check it (a small test, a command).
 
-Save it to a file (for example `docs/research/<date>-<slug>.md`) only if the user asks.
+Save it to a file (for example `docs/research/<date>-<slug>.md`) only if the question asks for it.
