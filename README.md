@@ -35,9 +35,9 @@ And three agents, which the skills spawn (`dev:<name>` once the plugin is instal
 | `sub-claude` | A Claude worker for sub-tasks that would fill the main conversation (diagnoses, plans, reviews, larger implementations), and for the tasks `sub-codex` hands back to Claude when Codex is kept in reserve or used up. Returns a summary under 25 lines. |
 | `artifact-maker` | Makes and updates one claude.ai Artifact (design mockups, report pages, dashboards, whiteboards) in its own context and returns the URL and at most 5 lines; feedback goes to the same agent, which republishes on the same URL. |
 
-`pr-review`, `tested`, `sub-codex`, `sub-claude` and `artifact-maker` are the author's daily versions and still
-assume his work setup: the DocuSketch folders under `~/Documents/projects/docusketch`, its mobile repo and Jira, the
-Codex CLI, and the phones of `device-test`.
+`pr-review` runs its analysis on the Codex CLI through `sub-codex`; it and `tested` need a `device-test` pack for
+the phone part. What belongs to one project (its tracker, knowledge base, checkouts and rule files, who runs the phone
+tests, the words of the reports) comes from that project's config and playbook, not from the skills.
 
 You don't have to type the commands: "pick the next bug", "open an issue for this", "search online how to…",
 "commit and push", "open the PR", "what do the reviewers say", "fix the conflicts", "why is CI red", "where are we",
@@ -98,10 +98,9 @@ A linked skill keeps its bare name, `/<name>` (and the agent `<name>`). The plug
 as `/dev:<name>` and `dev:<name>`; with both you get both.
 
 `pr-review`, `tested` and `sub-codex` call their scripts, and each other, through `~/.claude/skills/<name>/…`
-paths, so they need the link (or a copy) there. `sub-codex` also expects, in `settings.json`, its command
-`bash ~/.claude/skills/sub-codex/scripts/sub-codex.sh` in `sandbox.excludedCommands` (Codex cannot start inside
-Claude's sandbox) and `python3 ~/.claude/skills/sub-codex/scripts/quota-route.py` as a `UserPromptSubmit` hook,
-which adds the `quota route:` line to every prompt.
+paths, so they need the link (or a copy) there. What they need outside the repo (settings lines, a hook, a
+statusline file, a device-test pack) and how to recreate it is in "Setting up sub-codex" and "What pr-review and
+tested need outside the repo" below.
 
 ## Config
 
@@ -116,19 +115,69 @@ config adds to one kept in a folder above it instead of hiding it. Every key is 
   "clickup": {"list_id": "901234567"},
   "babysit": {"ignore_checks": ["PR Safeness"], "skip_comments": ["<!-- preview-builds-hint -->"],
               "copilot": {"request": true, "auto_review_bases": ["main"]}},
-  "disk_cleanup": {"pools": [{"root": "~/work", "checkouts": ["app-[0-9]*"]}], "defaults": {"derived_days": 2}}
+  "disk_cleanup": {"pools": [{"root": "~/work", "checkouts": ["app-[0-9]*"]}], "defaults": {"derived_days": 2}},
+  "device_test": {"pack": "myapp"},
+  "pr_review": {"knowledge_base": "~/work/product-docs"},
+  "tested": {"phones": ["pixel", "iphone"]}
 }
 ```
 
 - `locale`: the language of text the skills post for others (GitHub replies, PR comments); default `en`. The skills
   talk to you in your own language.
 - `playbook`: a Markdown file with your own procedures, one section per skill, relative to the folder that holds
-  `.claude/`. When it exists, babysit, commit-push and disk-cleanup read it, and where it and a skill both speak, the
-  playbook wins.
-- One block per skill: `clickup` (pick, ticket), `babysit`, `disk_cleanup`. Each skill's SKILL.md lists its keys.
+  `.claude/`. Each skill that takes project rules (babysit, ci-why, commit-push, crashes, device-test, disk-cleanup,
+  my-prs, pick, pr-review, tested) prints only its own section with `python3 shared/project_config.py section
+  <skill>`, so a long playbook costs each skill only its part; where the section and the skill both speak, the
+  section wins.
+- One block per skill: `clickup` (pick, ticket), `babysit`, `disk_cleanup`, `device_test`, `pr_review`, `tested`.
+  Each skill's SKILL.md lists its keys.
+- `~/.claude/config/project.json` is the config of your home folder, so it applies everywhere: the place for your
+  own settings that do not belong to one project, such as `sub_codex` (see "Setting up sub-codex"), which is read
+  from there only.
 
 Keep the file out of git when it holds private paths or team rules. `python3 shared/project_config.py [<key>]`
 prints what the skills see from the current folder.
+
+## Customizing a skill with your own pieces
+
+Some skills have named **pieces**: parts of their procedure your project can extend or swap without forking the
+skill, such as the gates `pick` stops at or the known CI failures `ci-why` rules out. A piece lives in the project's
+playbook (the `playbook` file named in `.claude/config/project.json`, see Config), in the skill's own section:
+
+    ## <skill>        the skill's section: the heading is exactly "## " and the skill's name
+    ### <piece>       one subsection per piece
+
+- A piece **adds to** the skill's default of the same name. When its first line is `Replaces the default.`, it
+  **replaces** it.
+- Text in the section outside a piece works as for every other skill: where it and the skill both speak, the
+  playbook wins.
+- At its start the skill prints only its own section (one shell line), so a long playbook costs each skill only its
+  own part. No playbook or no section: the defaults.
+- A piece is prose for Claude. Config keys exist only for values a script reads.
+
+| Skill | Piece | The default |
+|---|---|---|
+| `pick` | `gates` | when to stop and ask: the issue is closed, in review or someone else's; the problem is reachable only behind a flag that is off; the working tree holds changes that are not the issue's; the checkout is not on the planned branch before the first edit |
+| `pick` | `pr-shaping` | when to split the work into several PRs and when to keep one, their order, and an "if it ships last" mitigation for each |
+| `ci-why` | `known-causes` | what to rule out before blaming the PR: a dirty self-hosted runner, the merge commit CI builds, a rerun that repeats an old merge commit, a required check that never reports, snapshot tests, `gh run list`'s 1000-result cap |
+| `crashes` | `gates` | when the version passes (crash-free not worse than the previous version, no new issue in its top 5), and when a crash is fix now, hotfix, file it or ignore |
+| `my-prs` | `base-lag` | how to read the lag against each PR's own base, the PR of yours it is stacked on, and the lag its base carries |
+
+For example, a team whose iOS jobs sometimes fail on one dirty Mac runner, and whose releases roll out in steps:
+
+```markdown
+## ci-why
+
+### known-causes
+- **Stale cache on a Mac runner**: `Undefined symbol: _$s…` while linking the UI test target, on one runner only.
+  Not the PR: rerun the failed jobs, and tell the CI owners which runner.
+
+## crashes
+
+### gates
+- The rollout goes 10% → 50% → 100%, on Mondays; check the gate before each step.
+- Main flows: sign-in, search, checkout.
+```
 
 ## Issue trackers
 
@@ -199,6 +248,198 @@ Requirements: `adb` for Android; for an iPhone, Xcode and the WebDriverAgent sou
 `devtest wda` stops and prints the `npm install … appium-webdriveragent` line to run (they go into the state
 folder, `~/.cache/devtest` by default).
 
+## Setting up sub-codex
+
+`sub-codex` and `sub-claude` lean on pieces that live outside this repo. Without them the skill still runs, with less
+information; each piece below says what it is for, what happens without it and how to recreate it.
+
+### 1. The links
+
+The scripts and the skills that call them use `~/.claude/skills/sub-codex/…` paths, and `sub-codex.sh` hands tasks
+to the `sub-claude` agent by that name. Link both (a copy works too):
+
+```bash
+ln -s "$PWD/skills/sub-codex" ~/.claude/skills/sub-codex
+ln -s "$PWD/agents/sub-claude.md" ~/.claude/agents/sub-claude.md
+```
+
+### 2. The config
+
+The `sub_codex` block of `~/.claude/config/project.json`, the user-global config, and only that file (a project's
+config cannot widen where Codex works). Every key is optional; without the file Codex may work in every folder, no
+connector is named, and Codex runs and `sub-claude` answer in English.
+
+```json
+{"sub_codex": {"folders": ["~/work"], "label": "work", "codex_only": ["PostHog", "Crashlytics"],
+               "skills": "the *-codex skills", "language": "English"}}
+```
+
+- `folders`: Codex works only inside these; elsewhere `sub-codex.sh` exits 4 and the quota line sends every task to
+  Claude. Use it when Codex is paid for one kind of work only (a client's, an employer's).
+- `label`: how the quota line names those folders ("not a work folder").
+- `codex_only`: the connectors only your Codex has. While Codex is kept in reserve, only runs that need them
+  (`--needs-codex`) still go to Codex.
+- `skills`: how the quota line names your own skills built on sub-codex.
+- `language`: the language of the final message of Codex runs and of `sub-claude`.
+
+`python3 shared/project_config.py sub_codex`, run from your home folder, prints what the scripts see. A file that
+does not parse: the hook falls back to the defaults, and `sub-codex.sh` refuses every folder (exit 4) with the error.
+
+### 3. The quota hook
+
+`scripts/quota-route.py` adds a `quota route:` line to every prompt: whether medium tasks go to Codex or to Claude
+agents, on which tier, how many in parallel, and the model and effort for each class of Claude agent. In
+`~/.claude/settings.json`:
+
+```json
+"hooks": {
+  "UserPromptSubmit": [
+    {"hooks": [{"type": "command", "command": "python3 ~/.claude/skills/sub-codex/scripts/quota-route.py", "timeout": 5}]}
+  ]
+}
+```
+
+It runs on every prompt of every session, so it never fails loudly: any error prints nothing. Run it by hand to see
+the line: `echo '{"cwd": "'"$PWD"'"}' | python3 ~/.claude/skills/sub-codex/scripts/quota-route.py`.
+
+### 4. Claude's quota, from the statusline
+
+Claude Code passes the rate limits only to the statusline command, so the hook reads them from a file the statusline
+writes: `~/.cache/claude-statusline/limits-<name>.json`, where `<name>` is the folder name of `$CLAUDE_CONFIG_DIR`
+(`.claude` without it), so two accounts on one machine keep separate files. One JSON object, percentages and epoch
+seconds:
+
+```json
+{"five_pct": 19, "five_at": 1795630800, "week_pct": 20, "week_at": 1796054400}
+```
+
+Without the file Claude's quota reads as unknown: the agents' band stays `normal` and Codex is never put in reserve
+(over budget it stays on the slower tier). `skills/sub-codex/examples/statusline-limits.py` is a minimal statusline
+that writes it:
+
+```json
+"statusLine": {"type": "command", "command": "python3 ~/.claude/skills/sub-codex/examples/statusline-limits.py"}
+```
+
+To keep your own statusline, pipe its input to the example and drop the example's output:
+`printf '%s' "$input" | python3 ~/.claude/skills/sub-codex/examples/statusline-limits.py >/dev/null`.
+
+### 5. Running outside Claude's sandbox
+
+Codex cannot start inside Claude's sandbox ("Operation not permitted"), so the command runs outside it, and is
+allowed without a prompt. In `~/.claude/settings.json`, both spellings, since Claude writes either:
+
+```json
+"permissions": {"allow": [
+  "Bash(bash ~/.claude/skills/sub-codex/scripts/sub-codex.sh:*)",
+  "Bash(bash /Users/<you>/.claude/skills/sub-codex/scripts/sub-codex.sh:*)"
+]},
+"sandbox": {"excludedCommands": [
+  "bash ~/.claude/skills/sub-codex/scripts/sub-codex.sh:*",
+  "bash /Users/<you>/.claude/skills/sub-codex/scripts/sub-codex.sh:*"
+]}
+```
+
+The exclusion does not match a command holding backticks or `$(…)`: the prompt goes in a file (`--file`). When the
+call still lands in the sandbox, the script stops before Codex starts and exits 3.
+
+### 6. The Codex CLI
+
+- Installed: the script prefers the Codex app's daemon binary (`~/.codex/packages/app-server-daemon/current/bin/codex`,
+  which updates itself) and falls back to `codex` on `PATH`.
+- Logged in (`codex login`), on a plan that has the models the script names: `gpt-6.2-sol` (default),
+  `gpt-6.2-astra` (`--important` while Astra is on), `gpt-6-luna` (mechanical runs and Luna workers), and the fast
+  service tier. Change the names in `sub-codex.sh` when yours differ.
+- Codex's usage: Codex writes every session to `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. `quota-route.py`
+  reads the last `rate_limits` entry of the newest five files (`payload.rate_limits`, the window with
+  `window_minutes` 10080, its `used_percent` and `resets_at`). Nothing to set up; until Codex has run once the usage
+  reads as unknown and runs use the default tier.
+- Luna workers (`luna-workers.md`) need Codex's sub-agents (`spawn_agent`); without them Codex does those steps
+  itself.
+
+### 7. Tuning
+
+The thresholds sit at the top of `quota-route.py`: `FAST_ALWAYS`, `FAST_SLACK`, `CODEX_RESERVE`, the Astra window,
+Claude's margin, the `LADDER` of Claude models and efforts, `CLAUDE_PARALLEL`. `weight()` holds the author's working
+hours (weekdays 9-18:30 count fully, evenings and weekends a quarter, 3-9 nothing), which shape the pace and the
+spare: set your own.
+
+### Tests
+
+```bash
+python3 skills/sub-codex/scripts/test-route.py && python3 skills/sub-codex/scripts/test-astra.py && bash skills/sub-codex/scripts/test-folders.sh
+```
+
+## What pr-review and tested need outside the repo
+
+Both skills are instructions plus, for `tested`, one script. What they call lives outside their folders:
+
+1. **The skill links.** The SKILL.md files call `~/.claude/skills/<name>/…` (the Codex instructions, `sub-codex.sh`,
+   `devtest.py`, `tested.py`), and Codex reads `~/.claude/skills/pr-review/codex/*.md` by that path. With the plugin
+   installed, link them too; from a clone, the links are the install:
+
+       repo=~/path/to/sw-skills
+       for s in pr-review tested sub-codex device-test; do ln -s "$repo/skills/$s" ~/.claude/skills/$s; done
+       ln -s "$repo/agents/device-tester.md" ~/.claude/agents/device-tester.md
+
+   `pr-review` reads ClickUp tickets through `pick`'s script as `<skill dir>/../pick/scripts/clickup.py`; a link
+   resolves `..` inside the clone, so `pick` needs no link of its own.
+
+2. **A device-test pack.** `tested` maps the ledger's serials to the pack's phone aliases, reads each scenario's
+   checks from the pack's `scenarios/`, and lists the phones with no run; `pr-review`'s device stream picks the
+   pack's default phones. The smallest pack that serves both:
+
+       skills/device-test/packs/myapp/pack.json
+       {"android": {"package": "com.example.myapp"}, "ios": {"bundle_id": "com.example.myapp"},
+        "phones": {"pixel": {"platform": "android", "id": "<adb serial>", "name": "Pixel"},
+                   "iphone": {"platform": "ios", "id": "<UDID>", "name": "iPhone"}},
+        "default_for": {"android": "pixel", "ios": "iphone"}}
+
+   With several packs, name one in the project's config: `{"device_test": {"pack": "myapp"}}`.
+
+3. **The ledger.** Every `devtest run` appends its verdicts to `<state_dir>/ledger.jsonl` (`state_dir` from the
+   pack, default `~/.cache/devtest`); `tested` reads only that file. Nothing to create, but keep `state_dir` stable:
+   a new one starts `/tested` from an empty history.
+
+4. **Claude Code settings.** `devtest.py` talks to adb, usbmuxd and devicectl, which a Bash sandbox blocks; `gh`
+   may fail TLS inside it. In `~/.claude/settings.json` (the exclusion matches the command text, so list both
+   spellings of the path):
+
+       "sandbox": {"excludedCommands": [
+         "python3 ~/.claude/skills/device-test/scripts/devtest.py:*",
+         "python3 /Users/<you>/.claude/skills/device-test/scripts/devtest.py:*",
+         "gh:*"]},
+       "permissions": {"allow": [
+         "Bash(python3 ~/.claude/skills/device-test/scripts/devtest.py:*)",
+         "Bash(python3 /Users/<you>/.claude/skills/device-test/scripts/devtest.py:*)"]}
+
+   `tested.py` needs neither: it only reads git and the ledger, inside the sandbox.
+
+5. **Codex.** `pr-review` starts its three analysis streams with
+   `bash ~/.claude/skills/sub-codex/scripts/sub-codex.sh --full …` (`--full`: `gh` needs the keychain and the
+   reports land in Claude's scratchpad). That needs the Codex CLI logged in and sub-codex's own settings lines:
+   see "Setting up sub-codex" above. With no Codex, a failed stream is reported and Claude offers to do that part itself.
+   A tracker connector on the Codex side (Jira, say) lets the streams open the tickets the code names; Claude reads
+   the PR's own ticket itself.
+
+6. **The project's config and playbook** (all optional):
+
+       {"playbook": ".claude/config/playbook.md",
+        "pr_review": {"knowledge_base": "~/work/product-docs"},
+        "tested": {"phones": ["pixel", "iphone"],
+                   "paths": {"android": ["^legacy-app/"], "ios": ["^iosApp/"], "off": ["^screenshots/"]}}}
+
+   - `pr_review.knowledge_base`: the folder that holds the intended behaviour; its own
+     `.claude/config/project.json` `knowledge_base` block (`root`, `index`) names the file to start from.
+   - `tested.phones`: the phones `/tested` reports, in column order (default: the pack's).
+   - `tested.paths`: per bucket (`off`, `both`, `android`, `ios`, `build`), regexes for your own folders, added to
+     the Kotlin Multiplatform defaults.
+   - The playbook's `## pr-review` section: the tracker and how to read a ticket, the default repo and where the
+     checkouts are, the rule files for the risks, the device stream's runner and phones, the report's words in your
+     language. Its `## tested` section: the answer's words and columns. Its `## device-test` section: the runner.
+
+No hook: neither skill adds one.
+
 ## Customizing disk-cleanup
 
 Without touching code:
@@ -247,7 +488,7 @@ skills/<name>/SKILL.md                     the skills
 skills/babysit/scripts/babysit.py          PR status and replies (Python, stdlib only)
 skills/merge/scripts/merge.sh              the git part of /dev:merge (bash)
 skills/pick/scripts/clickup.py             ClickUp API for pick and ticket (Python, stdlib only)
-skills/my-prs/scripts/my_prs.py            your open PRs and their next step, one GraphQL call (Python, stdlib only)
+skills/my-prs/scripts/my_prs.py            your open PRs, their next step and their lag, two GraphQL calls (Python, stdlib only)
 skills/release-notes/scripts/release_prs.py  the PRs between two tags, grouped, batched GraphQL (Python, stdlib only)
 skills/device-test/scripts/devtest*.py     the phone test runner: drivers, scenarios, leases (Python, stdlib only)
 skills/device-test/packs/<name>/           your app's pack: config, flows, scenarios (local, gitignored)
@@ -258,6 +499,8 @@ skills/tested/scripts/tested.py            what of a PR the device-test ledger s
 skills/sub-codex/scripts/sub-codex.sh      runs codex exec, or hands the task to a Claude agent (bash)
 skills/sub-codex/scripts/quota-route.py    the Codex or Claude route and the tier, from both weekly quotas (Python, stdlib only)
 skills/sub-codex/scripts/test-*            sub-codex's own tests
+skills/sub-codex/examples/statusline-limits.py  a statusline that saves Claude's limits for the quota hook
+shared/project_config.py                   the project config, the playbook and its sections (Python, stdlib only)
 agents/device-tester.md                    the agent that runs device-test plans
 agents/sub-claude.md                       the Claude worker for delegated sub-tasks
 agents/artifact-maker.md                   the agent that builds claude.ai Artifacts
@@ -268,9 +511,8 @@ tests/                                     one test file per script
 
 ```bash
 claude plugin validate .
-python3 tests/test_babysit.py && python3 tests/test_clickup.py && python3 tests/test_my_prs.py && python3 tests/test_release_notes.py && python3 tests/test_disk_cleanup.py && python3 tests/test_memguard.py && bash tests/test_merge.sh
-for t in tests/test_devtest_*.py; do python3 "$t"; done
-python3 skills/sub-codex/scripts/test-route.py && python3 skills/sub-codex/scripts/test-astra.py && bash skills/sub-codex/scripts/test-docusketch-only.sh
+for t in tests/test_*.py; do python3 "$t" || echo "FAILED $t"; done; bash tests/test_merge.sh
+python3 skills/sub-codex/scripts/test-route.py && python3 skills/sub-codex/scripts/test-astra.py && bash skills/sub-codex/scripts/test-folders.sh
 claude plugin marketplace add ./      # try it locally without going through GitHub
 ```
 

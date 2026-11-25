@@ -109,8 +109,8 @@ def test_wait_connected_asks_to_plug_the_phone_in_and_gives_up_after_the_wait():
     assert got is False and sent == []  # already connected: no notification
     got, sent = wait(lambda t: t >= 9)
     assert got is True and sent == ["Plug in the Pixel 9: LOGIN-1 is waiting for it · shop-3"]
-    with mock.patch.object(C, "CONFIG", {"plug_in_text": "Attacca il %(phone)s (%(who)s)%(where)s"}):
-        assert wait(lambda t: t >= 9)[1] == ["Attacca il Pixel 9 (LOGIN-1) · shop-3"]
+    with mock.patch.object(C, "CONFIG", {"plug_in_text": "Connect the %(phone)s (%(who)s)%(where)s"}):
+        assert wait(lambda t: t >= 9)[1] == ["Connect the Pixel 9 (LOGIN-1) · shop-3"]
     got, sent = wait(lambda t: False, every=30)
     assert isinstance(got, C.Blocked) and len(sent) == 2  # at 0 s and 30 s of 60 s
     got, sent = wait(lambda t: False, env="0")

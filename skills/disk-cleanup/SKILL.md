@@ -45,9 +45,9 @@ are optional; without a config the pool and device sections are left out.
 - `phone_db_copies`: folders of copies of a phone's database, one folder per copy: all but the newest go.
 - `measure`: more folders measured in INFO. `defaults`: option defaults, such as `{"derived_days": 2}`.
 
-If the config has a `playbook` that points to an existing file
-(`python3 "${CLAUDE_SKILL_DIR}/../../shared/project_config.py" playbook` prints its path), read it and follow its
-disk-cleanup section: where the playbook and this skill both speak, the playbook wins.
+`python3 "${CLAUDE_SKILL_DIR}/../../shared/project_config.py" section disk-cleanup` prints this skill's section of
+the playbook the config names, and nothing else of it: follow it. Where the section and this skill both speak, the
+section wins.
 
 ## 1. Scan
 

@@ -10,8 +10,21 @@ find the issue → read it all → context → questions → plan → approval �
 ```
 
 **Approving the plan is the go-ahead.** Before it, nothing is written anywhere: no assignment, no status, no branch,
-no edit. After it, ask nothing more unless a stop below applies: take the issue, create the branch and implement
-the plan.
+no edit. After it, ask nothing more unless a gate or a stop below applies: take the issue, create the branch and
+implement the plan.
+
+## 0. Project pieces
+
+A project can add to or replace parts of this skill in its playbook. Print this skill's section, and nothing else
+of the playbook:
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/../../shared/project_config.py" section pick
+```
+
+Nothing printed: the defaults below. This skill's pieces are `gates` (§Gates) and `pr-shaping` (§PR shaping).
+A `### <piece>` subsection adds to the default of that name, or replaces it when its first line reads
+`Replaces the default.`; other text in the section wins where it and this skill both speak.
 
 ## 1. The tracker
 
@@ -55,9 +68,11 @@ Then what came with it:
 
 A file that does not download: say which and ask for it. A missing attachment is not an absent one.
 
-Stop and ask when the issue is closed, already in review, or assigned to someone else (say who).
+Then the gates that apply after reading the issue (§Gates).
 
 ## 4. Context
+
+First the gate before digging into the code (§Gates). Then:
 
 - The repo's rules: `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`, the README's development section.
 - The code the issue is about, and earlier attempts: `git log --oneline --grep "<issue number or keyword>"`.
@@ -83,7 +98,9 @@ Use plan mode when it is available (`ExitPlanMode`), otherwise write the plan in
 - what is left out on purpose;
 - the branch name: the repo's convention (look at `git branch -r --sort=-committerdate | head`), otherwise
   `<issue number>-<short-slug>`;
-- one PR or several. More than one only when the pieces can ship separately; then their order;
+- the base: the default branch, unless the repo's open PRs target another
+  (`gh pr list --state open --limit 30 --json baseRefName`);
+- one PR or several, as §PR shaping says;
 - what approval will also do: assign #<N> to the user, move it to `<status>` (ClickUp only), and create branch
   `<name>`: on GitHub `gh issue develop` creates it on origin, linked to the issue; on ClickUp it is local.
 
@@ -93,8 +110,7 @@ Approval covers the plan as written. Work the plan did not name (another area, a
 public API change, a different fix) stops the flow: show it and wait. With several PRs, do the first; the next one
 starts on the user's word.
 
-1. **The working tree**: uncommitted changes that are not this issue's stop the flow: say so and ask. Never carry
-   someone else's changes onto the new branch.
+1. **The working tree**: the gate before the branch (§Gates).
 2. **Take it**:
    - GitHub: `gh issue edit <N> --add-assignee @me`.
    - ClickUp: `clickup.py start <id>` assigns it and moves it to the list's in-progress status.
@@ -105,9 +121,37 @@ starts on the user's word.
    - GitHub: `gh issue develop <N> --base <base> --name <branch> --checkout`, which links the branch to the issue;
      if that fails, `git fetch origin && git switch -c <branch> origin/<base>`.
    - ClickUp: `git fetch origin && git switch -c <branch> origin/<base>`.
-4. **Implement** the plan, and nothing beyond it. Run the verification it names.
+4. **Implement** the plan, and nothing beyond it, once the gate before the first edit passes (§Gates). Run the
+   verification it names.
 5. **Report**: what changed, what ran and its result, what did not run. Commit, push and the PR are next steps the
    user starts (the commit-push and pr-create skills).
+
+## Gates
+
+Piece `gates`. Stop, say why, and ask:
+
+- **After reading the issue**: it is closed, already in review, or assigned to someone else (say who).
+- **Before digging into the code**: the problem is reachable only behind a feature flag that is off for users. Say
+  so first, with the entry points found, and propose not taking it now.
+- **After approval, before the branch**: the working tree holds changes that are not this issue's. Never carry them
+  onto the new branch. Editor litter alone (`.idea/`, `.DS_Store`) is not work: name it and go on.
+- **Before the first edit**: the checkout is not on the planned branch (`git branch --show-current`).
+
+## PR shaping
+
+Piece `pr-shaping`. Separate PRs when the work spans more than one repo, when a part needs its own reviewers or gate
+(a database migration, a schema or protocol file), when a part is generated churn (re-recorded snapshots,
+regenerated files), or when a slice is useful and revertible on its own. Keep one PR when splitting would leave a
+state that does not build, fails CI or ships half a feature: a split that must merge together is not a split.
+Crossing layers because the change needs them is no reason to split.
+
+With several PRs, order them (the producer of an API before its consumer) and answer for each: if this one ships
+last, what breaks meanwhile? The answer is a mitigation, not an order: none (with the evidence: an additive field, a
+consumer that ignores unknown keys), a flag off by default, a server guard, or what the old client does with the new
+response. If the only answer is an order, merge the pieces or add a flag. In the plan, one table:
+
+| # | Repo | Base | Branch | Contains | If it ships last |
+|---|---|---|---|---|---|
 
 ## Never
 

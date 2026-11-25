@@ -46,10 +46,9 @@ devtest command to `sandbox.excludedCommands`.
 1. **The main session does not drive phones and does not run scenarios.** Writing, running and rerunning a scenario,
    the red proof and a regression suite go to the runner, with the plan below.
 2. **Who the runner is.** By default the `device-tester` agent (`dev:device-tester` from the plugin), launched in
-   the background with the plan as its prompt. If
-   `python3 "${CLAUDE_SKILL_DIR}/../../shared/project_config.py" playbook` prints a path, read that file's
-   device-test section first: where it names another runner (Codex through sub-codex, say) or other rules, the
-   playbook wins.
+   the background with the plan as its prompt. First print this skill's section of the project's playbook with
+   `python3 "${CLAUDE_SKILL_DIR}/../../shared/project_config.py" section device-test`: where it names another runner
+   (Codex through sub-codex, say) or other rules, the section wins.
 3. The main session may run the read-only commands itself: `devices [--json]`, `lease status`, `build-info`,
    `suite report NAME`, `lint`. `build-info` waits for a phone that is not plugged in: give that Bash call a timeout
    above 300000.

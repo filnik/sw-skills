@@ -4,7 +4,11 @@
 Prints what the PR changes per platform, then one block per scenario × phone run on the PR's builds or named after
 its ticket: each check's latest verdict (devtest suite rules) and the build it ran on, measured against HEAD.
 
-    tested.py --repo <clone> [--base origin/main] [--ticket PHX-1234]
+    tested.py --repo <clone> [--base origin/main] [--ticket ABC-123]
+
+Reads the `tested` block of the project's .claude/config/project.json, found from the clone upward (all optional):
+`phones`, the device-test aliases to report, in that order (default: the pack's phones); `paths`, per bucket (off,
+both, android, ios, build) a list of regexes for the project's own folders, added to that bucket's defaults below.
 """
 from __future__ import annotations
 
@@ -14,36 +18,42 @@ import subprocess
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "device-test/scripts"))
+HERE = Path(__file__).resolve()
+sys.path.insert(0, str(HERE.parents[2] / "device-test/scripts"))
+sys.path.insert(0, str(HERE.parents[3] / "shared"))
 from devtest_common import DEVICES  # noqa: E402
 from devtest_scenario import load  # noqa: E402
 from devtest_suite import SCENARIOS, current_version, entries, verdicts  # noqa: E402
+from project_config import project_config  # noqa: E402
 
-PHONES = ["galaxy", "xiaomi", "pixel", "iphone"]
 SERIALS = {ident: alias for alias, (_, ident) in DEVICES.items()}
 NOT_JUDGED = ("SKIP", "NOT RUN")
 OLDER = " [older scenario version]"
+# Kotlin Multiplatform source sets, Swift and Gradle files. Checked in this order, the first match wins.
+DEFAULT_PATHS = {
+    "off": [r"/src/\w*Test/", r"/src/test/", r"Tests?/"],
+    "both": [r"/src/commonMain/"],
+    "android": [r"/src/androidMain/"],
+    "ios": [r"/src/(ios\w*|apple\w*|native\w*)Main/", r"/src/nativeInterop/", r"\.swift$"],
+    "build": [r"\.gradle(\.kts)?$", r"gradle\.properties$", r"\.versions\.toml$"],
+}
 
 
-def bucket(path: str) -> str:
+def path_rules(extra=None) -> list:
+    """(bucket, regex) in checking order: each bucket's defaults plus the project's own patterns for it."""
+    extra = extra or {}
+    return [(name, re.compile("|".join(pats + list(extra.get(name) or [])))) for name, pats in DEFAULT_PATHS.items()]
+
+
+def bucket(path: str, rules: list) -> str:
     """Where a changed file runs: both (shared code), android, ios, build (gradle), off (never on a phone)."""
-    if re.search(r"/src/\w*Test/|/src/test/|Tests?/|^KMP/(Screenshots|testfoundation|baa)/", path):
-        return "off"
-    if re.search(r"/src/(commonMain|mobileMain|composeMain)/|^KMP/proto/", path):
-        return "both"
-    if re.search(r"/src/androidMain/|^KMP/(legacyAndroid|android-app)/", path):
-        return "android"
-    if re.search(r"/src/(ios\w*|apple\w*|native\w*)Main/|/src/nativeInterop/|^KMP/iosApp/|\.swift$", path):
-        return "ios"
-    if re.search(r"\.gradle(\.kts)?$|gradle\.properties$|\.versions\.toml$|^KMP/build-logic/", path):
-        return "build"
-    return "off"
+    return next((name for name, rx in rules if rx.search(path)), "off")
 
 
-def summary(paths: list) -> str:
+def summary(paths: list, rules: list) -> str:
     groups = {}
     for p in paths:
-        groups.setdefault(bucket(p), []).append(p)
+        groups.setdefault(bucket(p, rules), []).append(p)
     return " · ".join("%s %d" % (b, len(groups[b])) for b in ("both", "android", "ios", "build", "off") if b in groups) \
         or "nothing", groups
 
@@ -55,6 +65,9 @@ def main() -> int:
     ap.add_argument("--ticket")
     a = ap.parse_args()
     repo = a.repo
+    conf = project_config(Path(repo).expanduser()).get("tested") or {}
+    rules = path_rules(conf.get("paths"))
+    phones = conf.get("phones") or list(DEVICES)
 
     def git(*args):
         return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True).stdout.strip()
@@ -68,7 +81,7 @@ def main() -> int:
     print("PR %s · branch %s · ticket %s · HEAD %s%s · base %s"
           % (repo, branch, ticket or "?", head[:10], " +uncommitted changes" if dirty else "", a.base))
 
-    line, groups = summary(git("diff", "--name-only", "%s...HEAD" % a.base).splitlines())
+    line, groups = summary(git("diff", "--name-only", "%s...HEAD" % a.base).splitlines(), rules)
     print("changed vs base (files): %s" % line)
     for b in ("android", "ios", "build"):
         if b in groups:
@@ -96,7 +109,7 @@ def main() -> int:
                         from_base += 1
                         continue
                     files = "merge" if " " in parents else summary(
-                        git("diff-tree", "--no-commit-id", "--name-only", "-r", full).splitlines())[0]
+                        git("diff-tree", "--no-commit-id", "--name-only", "-r", full).splitlines(), rules)[0]
                     lines.append("%s %s %s (%s)" % (full[:10], when, subject[:70], files))
                 labels[build] = ("B%d %s%s, %d commits before HEAD%s" % (
                     len(labels) + 1, sha, extra, len(after),
@@ -118,7 +131,7 @@ def main() -> int:
             rows.append(r)
     if not rows:
         print("ledger: no device-test run on this PR's builds or named after %s" % (ticket or "its ticket"))
-        print("phones with no run: %s" % ", ".join(PHONES))
+        print("phones with no run: %s" % ", ".join(phones))
         return 0
 
     reds = [r for r in rows if r["verdict"].startswith("RED")]
@@ -164,7 +177,7 @@ def main() -> int:
                 print("    %s" % line)
 
     tested = {r["phone"] for r in rows}
-    print("\nphones with no run: %s" % (", ".join(p for p in PHONES if p not in tested) or "none"))
+    print("\nphones with no run: %s" % (", ".join(p for p in phones if p not in tested) or "none"))
     return 0
 
 

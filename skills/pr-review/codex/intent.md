@@ -14,9 +14,9 @@ For each check `AC1…` in the brief:
   entry point to the same feature.
 
 Then: what the PR changes that no check and no scope line asks for (behaviour changed silently), and out-of-scope
-lines it crosses. Behaviour the ticket leaves open is looked up in docusketch-product, not guessed. When the ticket
-or docusketch-product puts the feature behind a flag, check that every new path is gated and the flag-off path is
-unchanged.
+lines it crosses. Behaviour the ticket leaves open is looked up in the knowledge base the brief names, not
+guessed. When the ticket or the knowledge base puts the feature behind a flag, check that every new path is gated and
+the flag-off path is unchanged.
 
 ## 2. Fit with the app
 

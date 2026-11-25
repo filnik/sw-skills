@@ -47,6 +47,21 @@ def test_a_repo_config_adds_to_the_parent_config_and_wins_on_shared_keys():
         shutil.rmtree(tmp)
 
 
+def test_section_returns_only_the_named_section_and_its_pieces_and_nothing_without_a_playbook():
+    tmp = Path(tempfile.mkdtemp()).resolve()
+    try:
+        (tmp / ".claude/config").mkdir(parents=True)
+        (tmp / ".claude/config/project.json").write_text(json.dumps({"playbook": "book.md"}))
+        (tmp / "book.md").write_text(
+            "# book\n\n## pick\n\nShared.\n\n### gates\n- estimated\n\n## pickle\n\nnot pick\n\n## tested\n- galaxy\n")
+        assert pc.section("pick", tmp) == "## pick\n\nShared.\n\n### gates\n- estimated"
+        assert pc.section("tested", tmp) == "## tested\n- galaxy"
+        assert pc.section("babysit", tmp) == ""
+        assert pc.section("pick", Path("/")) == ""  # no config, so no playbook
+    finally:
+        shutil.rmtree(tmp)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

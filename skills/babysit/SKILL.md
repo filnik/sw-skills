@@ -37,8 +37,9 @@ upward (all keys optional):
 - `copilot.request`: the project wants a Copilot review of every head; `auto_review_bases` are the bases whose
   ruleset already reviews every push.
 
-When status prints a `config` line with a `playbook`, read that file before the report and follow its babysit
-section: where the playbook and this skill both speak, the playbook wins.
+When status prints a `config` line with a `playbook`, print this skill's section of it before the report, and
+nothing else of it, with `python3 "${CLAUDE_SKILL_DIR}/../../shared/project_config.py" section babysit`, and follow
+it: where the section and this skill both speak, the section wins.
 
 ## 1. Status
 

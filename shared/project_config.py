@@ -3,6 +3,9 @@
 
     python3 project_config.py [<key>]   print the config, or one top-level block, as JSON ({} when there is none);
                                         "playbook" is printed as an absolute path, and only when the file exists
+    python3 project_config.py section <skill>
+                                        print the playbook's `## <skill>` section, up to the next `## ` heading;
+                                        nothing when there is no playbook or no such section
 
 Every ancestor is checked, not only the first one with a .claude folder: a repo can have its own .claude/ while the
 config sits in a folder above it. All the configs found are merged, the nearest winning key by key. Scripts import this file through their own resolved path, which works through a
@@ -64,7 +67,28 @@ def playbook(start=None):
     return p if p.is_file() else None
 
 
+def section(name, start=None):
+    """The playbook's `## <name>` section with its `###` pieces, up to the next `## ` heading, or ''."""
+    book = playbook(start)
+    if not book:
+        return ""
+    out, inside = [], False
+    for line in book.read_text().splitlines():
+        if line.startswith("## "):
+            inside = line[3:].strip() == name
+        if inside:
+            out.append(line)
+    return "\n".join(out).strip()
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["section"]:
+        if len(sys.argv) != 3:
+            sys.exit("usage: project_config.py section <skill>")
+        text = section(sys.argv[2])
+        if text:
+            print(text)
+        sys.exit(0)
     cfg = dict(project_config())
     book = playbook()
     cfg.pop("playbook", None)

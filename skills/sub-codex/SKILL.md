@@ -1,41 +1,58 @@
 ---
 name: sub-codex
-description: Hands a well-scoped sub-task to Codex (codex exec, gpt-6.2-sol at xhigh by default) and brings back only its final summary, so the work is paid from the Codex quota and its logs stay out of Claude's context. Use for "/sub-codex", "have Codex do it", "delegate to Codex", "run it on Codex", "fallo fare a codex", "delega a codex", "lancia su codex", and on your own for medium tasks with a clear goal and a way to check the result (well-specified app code, mechanical refactors, tests, data queries and evidence gathering). DocuSketch folders only (~/Documents/projects/docusketch): never for personal projects. Not for design decisions, unclear requirements, implementing CI workflows, shell/build scripts or tooling, subtle diagnoses or critical fixes (unless the quota line says Astra is on), or work that needs the user's input midway.
+description: Hands a well-scoped sub-task to Codex (codex exec, gpt-6.2-sol at xhigh by default) and brings back only its final summary, so the work is paid from the Codex quota and its logs stay out of Claude's context. Use for "/sub-codex", "have Codex do it", "delegate to Codex", "run it on Codex", "fallo fare a codex", "delega a codex", "lancia su codex", and on your own for medium tasks with a clear goal and a way to check the result (well-specified app code, mechanical refactors, tests, data queries and evidence gathering). Only in the folders the user lets Codex work in (config `sub_codex.folders`; every folder without it). Not for design decisions, unclear requirements, implementing CI workflows, shell/build scripts or tooling, subtle diagnoses or critical fixes (unless the quota line says Astra is on), or work that needs the user's input midway.
 ---
 
 # sub-codex
 
-Claude's weekly quota is usually the scarce one (Team Premium = Max 5x limits). Codex has its own, so a medium task
-done there costs Claude one call to start it and one short summary to read.
+Claude's weekly quota is usually the scarce one. Codex has its own, so a medium task done there costs Claude one
+call to start it and one short summary to read.
 
-## Only DocuSketch
+## Config
 
-Codex is for DocuSketch work only: its working directory (`--cd`, or the current directory) must be inside
-`~/Documents/projects/docusketch`. In any other folder (personal projects) do
-every task with Claude, also an explicit "have Codex do it": say that Codex is reserved for DocuSketch. The script
-refuses any other folder with exit 4, and the quota hook routes those prompts to Claude.
+The scripts read the `sub_codex` block of the user-global `~/.claude/config/project.json`, and only that file: where
+Codex may work and what only it has belong to the user's Codex account, not to a project. All keys are optional.
+
+```json
+{"sub_codex": {"folders": ["~/work"], "label": "work", "codex_only": ["PostHog", "Crashlytics"],
+               "skills": "the *-codex skills", "language": "English"}}
+```
+
+- `folders`: Codex works only inside these folders (default: none, so everywhere). Elsewhere every task goes to
+  Claude: the script exits 4 and the quota hook routes those prompts to Claude.
+- `label`: what the quota line calls those folders ("not a work folder"; default `Codex`).
+- `codex_only`: the connectors only Codex has, which keep Codex in reserve and which `--needs-codex` is for (default:
+  none named, the line says "runs that need Codex").
+- `skills`: how the quota line names the skills that delegate through sub-codex (default "the skills built on it").
+- `language`: the language of the final message of every Codex run and of `sub-claude` (default `English`).
+  `python3 ~/.claude/skills/sub-codex/scripts/quota-route.py --language` prints it.
+
+## Only in the allowed folders
+
+Codex's working directory (`--cd`, or the current directory) must be inside one of `folders`. In any other folder do
+every task with Claude, also an explicit "have Codex do it": say that Codex is kept to those folders.
 
 ## Which quota
 
-Every prompt carries a `quota route:` line (UserPromptSubmit hook, `scripts/quota-route.py`). Inside DocuSketch it
-routes to Codex: fast below 70% of Codex's weekly usage, and from 70% fast while within budget, the slower tier when
-over it (negative Codex spare); sub-codex picks the tier by itself. From 80% and over budget, while Claude has margin
-(week at most 60% used, 5h window under 50%), it routes to `claude`: Codex is kept for what only it has (PostHog,
-Crashlytics, SigNoz stag and sand). The user (25/11): "better to run out of Codex before Claude… if Codex gets too
-strained, let's send as much as we can to Claude".
+Every prompt carries a `quota route:` line (UserPromptSubmit hook, `scripts/quota-route.py`). In the allowed folders
+it routes to Codex: fast below 70% of Codex's weekly usage, and from 70% fast while within budget, the slower tier
+when over it (negative Codex spare); sub-codex picks the tier by itself. From 80% and over budget, while Claude has
+margin (week at most 60% used, 5h window under 50%), it routes to `claude`: Codex is kept for what only it has
+(`codex_only`). The user (25/11): "better to run out of Codex before Claude… if Codex gets too strained, let's send
+as much as we can to Claude".
 
-- `codex`: delegate as below, and so do the skills built on Codex (`/pr-review`, `/device-test`, `/merge-codex`,
-  `/build`, the `*-codex` ones). On the slower tier only an urgent task may go to Claude instead; if unsure it is
-  urgent, ask the user.
-- `claude` inside DocuSketch (Codex in reserve or used up): use this skill and the `*-codex` skills as usual. The
-  script does not start Codex: it writes the task to a file, prints one Agent call (`sub-claude` with the model and
-  effort to use, or the Claude agent the calling skill names, e.g. `device-tester`) and exits 5. Exit 5 is not a Codex
-  failure: make that call as printed, tell the user in one line that the task runs on Claude and why, then go on with
-  the calling skill's steps. Runs that need Codex pass `--needs-codex` and Luna runs stay on Codex while it is in
-  reserve; once it is used up, everything goes to Claude. The user's "have Codex do it" while Codex is in reserve
-  means "delegate": it goes to sub-claude unless they insist on Codex.
-- `claude` outside DocuSketch: there is only Claude, on the user's own paid plan. Do every task with Claude, also
-  what they ask to hand to Codex, and say why.
+- `codex`: delegate as below, and so do the skills built on Codex (`/pr-review`, `/device-test`, and those the
+  config's `skills` names). On the slower tier only an urgent task may go to Claude instead; if unsure it is urgent,
+  ask the user.
+- `claude` in the allowed folders (Codex in reserve or used up): use this skill and the skills built on it as usual.
+  The script does not start Codex: it writes the task to a file, prints one Agent call (`sub-claude` with the model
+  and effort to use, or the Claude agent the calling skill names, e.g. `device-tester`) and exits 5. Exit 5 is not a
+  Codex failure: make that call as printed, tell the user in one line that the task runs on Claude and why, then go
+  on with the calling skill's steps. Runs that need Codex pass `--needs-codex` and Luna runs stay on Codex while it
+  is in reserve; once it is used up, everything goes to Claude. The user's "have Codex do it" while Codex is in
+  reserve means "delegate": it goes to sub-claude unless they insist on Codex.
+- `claude` outside the allowed folders: there is only Claude. Do every task with Claude, also what the user asks to
+  hand to Codex, and say why.
 - Decide once per task: a task started on one side finishes there.
 - Claude agents' model and effort: the quota line ends with the pick for each class, from Claude's quota (ample,
   normal, tight). Pass both `model` and `effort` in the Agent call. `hard`: critical fixes, subtle diagnoses,
@@ -106,8 +123,8 @@ again at every run, so it switches itself off as the Astra runs use up that spar
 
 Options:
 
-- `--cd DIR`: the repo or worktree the task works in (default: the current directory). Must be inside
-  `~/Documents/projects/docusketch`, or the script exits 4.
+- `--cd DIR`: the repo or worktree the task works in (default: the current directory). Must be inside one of the
+  config's `folders`, or the script exits 4.
 - `--full`: no Codex sandbox. Needed for Gradle and xcodebuild (they write `~/.gradle`, `~/.konan` and
   DerivedData), for the phones (adb, usbmuxd) and for files outside `--cd`. Without it Codex runs workspace-write:
   it writes only in `--cd` and the temp dirs, with network.
@@ -118,18 +135,18 @@ Options:
   reset going over by at most `FAST_SLACK` (about an hour of work), and uses the default tier otherwise or when the
   usage cannot be read. It is decided again at every run, so a fast tier that spends too much switches itself off.
   Callers pass nothing for it. `--fast` forces the fast tier: only when the user asks for speed.
-- `--needs-codex`: the run uses a connector only Codex has (PostHog, Crashlytics, SigNoz stag or sand) or the user
-  insists on Codex: it stays on Codex while Codex is in reserve.
+- `--needs-codex`: the run uses a connector only Codex has (`codex_only`) or the user insists on Codex: it stays on
+  Codex while Codex is in reserve.
 - `--important`: an implementation, code review or merge-conflict run. On `gpt-6.2-astra` while Astra is on (§Astra),
   on Sol otherwise; an explicit `--model` wins. Run it in the background: Astra's duration is not measured yet.
 - `--model`, `--effort`: default `gpt-6.2-sol`, `xhigh`.
   Effort floor: `high`; `medium` only for truly trivial steps, never `low`.
   Keep `xhigh` where reasoning really matters; callers set `--effort high` for ordinary bounded work.
   `--model gpt-6-luna` (a twentieth of Sol's credits) only for mechanical runs with nothing to judge: the callers
-  open, open-pr, build, done and check-prs pass it.
+  that only open a page, draft a message, list PR states or put a build on a phone pass it.
 - Luna workers: a prompt that is mostly gathering (queries, logs, searches, inventories) stays on Sol and adds
   "Follow ~/.claude/skills/sub-codex/luna-workers.md", then which steps go to Luna and which stay
-  with Sol (planning, judgements, checks, the report). The gathering `*-codex` skills already say it in their
+  with Sol (planning, judgements, checks, the report). The gathering skills built on Codex say it in their
   instructions. Not for implementation, reviews, merges or device tests.
 - `--name`: label for the log and output files.
 - `--file PROMPT.md "text"`: the text is appended to the file, for a fixed prompt plus its parameters (plain
@@ -138,7 +155,7 @@ Options:
 The script adds fixed rules to every prompt: no commit, push, rebase, merge, reset or branch switch; `rg` on the
 working tree, git grep only for a commit not checked out and with `LC_ALL=C` unless it is plain `-F` without `-i`,
 at most two repo-wide searches at once, both rules copied
-into every spawned agent; final message in Italian under 25 lines. On "Selected model is at capacity" (OpenAI out of capacity, not our quota) it resumes the
+into every spawned agent; final message in the config's `language`, under 25 lines. On "Selected model is at capacity" (OpenAI out of capacity, not our quota) it resumes the
 same session at once, then after 15, 30, 60 and 120 s; the log marks each resume.
 
 ## After

@@ -1,32 +1,34 @@
 #!/usr/bin/env python3
-# Dove fare i task medi che Claude delegherebbe da solo: su Codex, tranne fuori DocuSketch o con Codex finito;
-# sopra il budget sul tier lento; dall'80% e sopra il budget, con Claude in margine, su agent Claude (sub-claude)
-# e Codex resta di riserva per i connettori che ha solo lui.
-# Stampa una riga per il contesto (hook UserPromptSubmit); con --codex-tier l'uso settimanale di Codex, il tier
-# di sub-codex (fast o default) e il modello delle run --important (astra o sol); con --sub-route la strada di
-# sub-codex.sh (codex, claude reserve o claude usedup); con --claude-pick hard|judgement|gathering modello ed effort
-# dell'agent Claude, che la riga riporta anche per tutte e tre le difficoltà.
+# Where the medium tasks Claude would delegate on its own go: to Codex, except outside the folders Codex may work in
+# or with Codex used up; over budget on the slower tier; from 80% and over budget, while Claude has margin, to Claude
+# agents (sub-claude), with Codex kept in reserve for what only it has.
+# Prints one line for the context (UserPromptSubmit hook). --codex-tier prints Codex's weekly usage, the sub-codex
+# tier (fast or default) and the model of --important runs (astra or sol); --sub-route the way for sub-codex.sh
+# (codex, claude reserve or claude usedup); --claude-pick hard|judgement|gathering the Claude agent's model and
+# effort, which the line also gives for all three classes; --folder DIR exits 4 when Codex may not work in DIR;
+# --language the language of the final message of Codex runs and of sub-claude.
 #
-# avanzo = 100 - usato - ritmo x ore pesate fino al reset: la quota che a quel ritmo scade senza essere usata.
-# ritmo = il maggiore fra quello misurato in questa finestra e 100 / ore pesate di una settimana.
-# Nel primo quarto della finestra la proiezione cresce con le ore trascorse: il ritmo iniziale è poco affidabile.
-# Pesi dai transcript di ott 2026 (70% lun-ven 9-18:30, 19% sera, 11% weekend): giorno feriale 1,
-# sera e weekend 0.25, 3:00-9:00 zero.
+# spare = 100 - used - pace x weighted hours until the reset: the quota that, at this pace, expires unused.
+# pace = the larger of the one measured in this window and 100 / the weighted hours of a week.
+# In the first quarter of the window the projection grows with the hours elapsed: the early pace is unreliable.
+# Weights from the author's transcripts (70% Mon-Fri 9-18:30, 19% evening, 11% weekend): weekday 1,
+# evening and weekend 0.25, 3:00-9:00 zero.
 import glob, json, os, sys, time
 from datetime import datetime
+from pathlib import Path
 
 WEEK = 7 * 86400
-CODEX_MAX = 100       # Codex settimanale da cui lo si considera finito
-FAST_ALWAYS = 70      # Codex settimanale fino a cui sub-codex va sempre sul fast tier
-FAST_SLACK = 1.5      # punti che il fast può sforare al reset (~un'ora di lavoro): se Codex finisce prima c'è Claude
-ASTRA_DAYS = 3        # giorni prima del reset da cui le run --important di sub-codex possono andare su Astra
-ASTRA_PER_DAY = 10    # avanzo minimo per giorno che manca al reset: 30 punti a tre giorni, 10 a uno
-CODEX_RESERVE = 80    # Codex settimanale da cui, sopra il budget, il lavoro va su Claude se Claude ha margine
-CLAUDE_WEEK_MAX = 60  # margine di Claude: settimana usata al massimo al 60% (l'uso, non l'avanzo: a inizio
-CLAUDE_FIVE_MAX = 50  # settimana la proiezione sbaglia) e finestra di 5 ore sotto la metà, che ferma anche la chat
+CODEX_MAX = 100       # Codex weekly usage from which it counts as used up
+FAST_ALWAYS = 70      # Codex weekly usage up to which sub-codex always runs on the fast tier
+FAST_SLACK = 1.5      # points the fast tier may overshoot at the reset (~one hour of work): Claude covers the rest
+ASTRA_DAYS = 3        # days before the reset from which sub-codex's --important runs may go to Astra
+ASTRA_PER_DAY = 10    # minimum spare per day left until the reset: 30 points at three days, 10 at one
+CODEX_RESERVE = 80    # Codex weekly usage from which, over budget, the work goes to Claude if Claude has margin
+CLAUDE_WEEK_MAX = 60  # Claude's margin: week at most 60% used (the usage, not the spare: early in the week the
+CLAUDE_FIVE_MAX = 50  # projection is wrong) and the 5-hour window under half, which also stops the chat
 
-# Modello ed effort degli agent Claude (sub-claude) per difficoltà del task e quota di Claude. Minimi dell'utente
-# (25/11): Sonnet e Opus mai sotto high, Fable mai sotto medium. Prezzo per token: Sonnet 1, Opus 2, Fable 4.
+# Model and effort of the Claude agents (sub-claude) by task class and Claude quota. The user's floors (25/11):
+# Sonnet and Opus never below high, Fable never below medium. Price per token: Sonnet 1, Opus 2, Fable 4.
 LADDER = {
     "hard":      {"ample": ("fable", "high"),  "normal": ("fable", "medium"), "tight": ("opus", "high")},
     "judgement": {"ample": ("opus", "xhigh"),  "normal": ("opus", "high"),    "tight": ("sonnet", "high")},
@@ -34,8 +36,55 @@ LADDER = {
 }
 
 
-# Agent Claude in parallelo al massimo, per fascia di quota (l'utente, 25/11: "bilanciato in base a quanti token hai").
+# Claude agents in parallel at most, per quota band (the user, 25/11: "balanced on how many tokens you have").
 CLAUDE_PARALLEL = {"ample": 3, "normal": 2, "tight": 1}
+
+# The sub_codex block of the user-global config: where Codex may work (every folder when empty), how the route line
+# names those folders, what only Codex has, the skills built on sub-codex, and the language of the final messages.
+DEFAULTS = {"folders": [], "label": "Codex", "codex_only": [], "skills": "the skills built on it",
+            "language": "English"}
+
+
+def settings(strict=False):
+    """The sub_codex block of ~/.claude/config/project.json over DEFAULTS. Only that file: where Codex may work and
+    what only it has belong to the user's Codex account, not to a project. Unreadable: DEFAULTS, or raise if strict."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "shared"))
+        from project_config import project_config
+        block = project_config(Path.home()).get("sub_codex")
+    except (Exception, SystemExit):
+        if strict:
+            raise
+        block = None
+    cfg = {**DEFAULTS, **(block if isinstance(block, dict) else {})}
+    if isinstance(cfg["folders"], str):
+        cfg["folders"] = [cfg["folders"]]
+    return cfg
+
+
+def codex_allowed(path, cfg):
+    """True when Codex may work in path: anywhere without folders, otherwise inside one of them."""
+    roots = [os.path.realpath(os.path.expanduser(f)) for f in cfg["folders"]]
+    p = os.path.realpath(os.path.expanduser(path))
+    return not roots or any(p == r or p.startswith(r.rstrip(os.sep) + os.sep) for r in roots)
+
+
+def check_folder(path):
+    """0 when Codex may work in path, otherwise 4 with the reason on stderr (sub-codex.sh exits with it)."""
+    cfg = settings(strict=True)
+    if not os.path.isdir(os.path.expanduser(path)):
+        print(f"sub-codex: {path} is not a folder.", file=sys.stderr)
+        return 4
+    if codex_allowed(path, cfg):
+        return 0
+    print(f"sub-codex: Codex works only in the {cfg['label']} folders ({', '.join(cfg['folders'])});"
+          f" {os.path.realpath(path)} is not one. Do the task with Claude.", file=sys.stderr)
+    return 4
+
+
+def and_list(items):
+    items = [str(i) for i in items]
+    return ", ".join(items[:-1]) + " and " + items[-1] if len(items) > 1 else "".join(items)
 
 
 def weight(ts):
@@ -47,7 +96,7 @@ def weight(ts):
 
 
 def hours(a, b):
-    """Ore pesate fra due epoch, a passi di un quarto d'ora."""
+    """Weighted hours between two epochs, in quarter-hour steps."""
     total, t = 0.0, a
     while t < b:
         total += weight(t) * min(900, b - t) / 3600
@@ -56,7 +105,7 @@ def hours(a, b):
 
 
 def window(used, reset, now):
-    """Uso e reset della finestra settimanale; passato il reset la finestra riparte da zero."""
+    """Usage and reset of the weekly window; past the reset the window starts again from zero."""
     if used is None or not reset:
         return None
     if reset <= now:
@@ -67,7 +116,7 @@ def window(used, reset, now):
 
 
 def read_claude(now):
-    # scritto dalla statusline a ogni aggiornamento: rate_limits arriva solo a lei
+    # written by the statusline at every refresh: rate_limits reach only the statusline
     name = os.path.basename((os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")).rstrip("/"))
     try:
         with open(os.path.expanduser(f"~/.cache/claude-statusline/limits-{name}.json")) as f:
@@ -81,7 +130,7 @@ def read_claude(now):
 
 
 def read_codex(now):
-    """Ultimo limite settimanale di Codex nelle sue sessioni (coda degli ultimi file)."""
+    """Codex's latest weekly limit in its sessions (tail of the latest files)."""
     files = sorted(glob.glob(os.path.expanduser("~/.codex/sessions/*/*/*/rollout-*.jsonl")), key=os.path.getmtime)
     for path in reversed(files[-5:]):
         with open(path, "rb") as f:
@@ -112,12 +161,12 @@ def spare(w, now):
 
 
 def fast_tier(w, now):
-    # deciso a ogni lancio: se il fast consuma troppo l'avanzo scende e si torna al default
+    # decided at every run: if the fast tier spends too much the spare drops and runs go back to the default tier
     return w["used"] <= FAST_ALWAYS or spare(w, now) >= -FAST_SLACK
 
 
 def astra(w, now):
-    # deciso a ogni lancio: ogni run Astra abbassa l'avanzo, e sotto la soglia si torna a Sol
+    # decided at every run: every Astra run lowers the spare, and below the threshold runs go back to Sol
     days = (w["reset"] - now) / 86400
     return days <= ASTRA_DAYS and spare(w, now) >= ASTRA_PER_DAY * days
 
@@ -127,8 +176,8 @@ def claude_margin(claude):
 
 
 def claude_band(claude, now):
-    """ample, normal o tight: quanto possono spendere gli agent Claude. A inizio settimana l'avanzo è ottimista e
-    decide l'uso; a fine settimana l'uso è alto anche con quota libera e decide l'avanzo."""
+    """ample, normal or tight: how much the Claude agents may spend. Early in the week the spare is optimistic and
+    the usage decides; late in the week the usage is high even with free quota and the spare decides."""
     if not claude:
         return "normal"
     used, five, left = claude["used"], claude.get("five", 0), spare(claude, now)
@@ -140,7 +189,7 @@ def claude_band(claude, now):
 
 
 def codex_parallel(w, now):
-    """Run Codex in parallelo: 3 sotto il 70%, 2 sopra ma nel budget (o uso illeggibile), 1 sopra il budget."""
+    """Codex runs in parallel: 3 under 70%, 2 above it but within budget (or usage unreadable), 1 over budget."""
     if not w:
         return 2
     if w["used"] < FAST_ALWAYS:
@@ -155,7 +204,7 @@ def ladder_line(claude, now):
 
 
 def route(codex, claude, now):
-    """('claude' | 'codex', motivo) per i task medi che Claude delegherebbe da solo."""
+    """('claude' | 'codex', reason) for the medium tasks Claude would delegate on its own."""
     if codex and codex["used"] >= CODEX_MAX:
         return "claude", "Codex is used up"
     if not codex:
@@ -176,15 +225,41 @@ def describe(name, w, now):
     return s + (f", 5h {w['five']:.0f}%" if "five" in w else "")
 
 
-def in_docusketch(path):
-    """sub-codex lavora solo nelle cartelle DocuSketch (stessa regola di sub-codex.sh)."""
-    root = os.path.realpath(os.path.expanduser("~/Documents/projects/docusketch"))
-    p = os.path.realpath(path)
-    return p == root or p.startswith(root + os.sep)
+def route_line(cwd, codex, claude, now, cfg):
+    """The hook's line for a prompt in cwd."""
+    if not codex_allowed(cwd, cfg):
+        return (f"quota route: claude (not a {cfg['label']} folder: sub-codex and {cfg['skills']} run only there)."
+                f" Do every task with Claude, also when the user asks for Codex. {ladder_line(claude, now)}")
+    side, why = route(codex, claude, now)
+    only = and_list(cfg["codex_only"])
+    if side == "claude":
+        action = (f"Medium tasks go to Claude agents. Use sub-codex and {cfg['skills']} as usual: sub-codex.sh does"
+                  " not start Codex, exits 5 and prints one Agent call (sub-claude, or the Claude agent the calling"
+                  " skill names, e.g. device-tester). Exit 5 is not a Codex failure: make that call as printed, then"
+                  " go on with the calling skill's steps; tell the user in one line that the task runs on Claude and why.")
+        action += (f" Only {only + ' runs' if only else 'runs that need Codex'} (--needs-codex) still go to Codex."
+                   if why.startswith("Codex kept") else
+                   f" {only or 'Runs that need Codex (--needs-codex)'} cannot run until Codex resets: say so.")
+    elif why.startswith("slower"):
+        action = ("Hand medium tasks to Codex as usual: sub-codex picks the slower tier by itself. Only an urgent task"
+                  " may go to Claude instead; if unsure it is urgent, ask the user.")
+    else:
+        action = "Hand medium tasks to Codex as usual."
+    if side == "codex":
+        action += f" At most {codex_parallel(codex, now)} Codex runs in parallel."
+    if side == "codex" and codex and astra(codex, now):
+        action += (" Astra is on (checked again at every run): pass --important to implementations, code reviews and"
+                   " merges; complex implementations, subtle diagnoses and critical fixes go to Codex too, and Claude"
+                   " reviews the result.")
+    return (f"quota route: {side} ({why}) - {describe('Claude', claude, now)} · {describe('Codex', codex, now)}. {action}"
+            f" {ladder_line(claude, now)}")
 
 
 def main():
     now = time.time()
+    if sys.argv[1:] == ["--language"]:
+        print(settings()["language"])
+        return
     codex = read_codex(now)
     if sys.argv[1:] == ["--codex-tier"]:
         if codex:
@@ -203,37 +278,14 @@ def main():
         cwd = json.load(sys.stdin).get("cwd") or os.getcwd() if not sys.stdin.isatty() else os.getcwd()
     except Exception:
         cwd = os.getcwd()
-    claude = read_claude(now)
-    if not in_docusketch(cwd):
-        print("quota route: claude (not a DocuSketch folder: sub-codex and the *-codex skills run only there)."
-              f" Do every task with Claude, also when the user asks for Codex. {ladder_line(claude, now)}")
-        return
-    side, why = route(codex, claude, now)
-    if side == "claude":
-        action = ("Medium tasks go to Claude agents. Use sub-codex and the *-codex skills as usual: sub-codex.sh does"
-                  " not start Codex, exits 5 and prints one Agent call (sub-claude, or the Claude agent the calling"
-                  " skill names, e.g. device-tester). Exit 5 is not a Codex failure: make that call as printed, then"
-                  " go on with the calling skill's steps; tell the user in one line that the task runs on Claude and why.")
-        action += (" Only PostHog, Crashlytics and SigNoz stag/sand runs (--needs-codex) still go to Codex."
-                   if why.startswith("Codex kept") else
-                   " PostHog, Crashlytics and SigNoz stag/sand cannot run until Codex resets: say so.")
-    elif why.startswith("slower"):
-        action = ("Hand medium tasks to Codex as usual: sub-codex picks the slower tier by itself. Only an urgent task"
-                  " may go to Claude instead; if unsure it is urgent, ask the user.")
-    else:
-        action = "Hand medium tasks to Codex as usual."
-    if side == "codex":
-        action += f" At most {codex_parallel(codex, now)} Codex runs in parallel."
-    if side == "codex" and codex and astra(codex, now):
-        action += (" Astra is on (checked again at every run): pass --important to implementations, code reviews and"
-                   " merges; complex implementations, subtle diagnoses and critical fixes go to Codex too, and Claude"
-                   " reviews the result.")
-    print(f"quota route: {side} ({why}) - {describe('Claude', claude, now)} · {describe('Codex', codex, now)}. {action}"
-          f" {ladder_line(claude, now)}")
+    print(route_line(cwd, codex, read_claude(now), now, settings()))
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--folder"]:
+        # fails closed: an error here exits nonzero, and sub-codex.sh refuses the folder
+        sys.exit(check_folder(sys.argv[2] if len(sys.argv) > 2 else os.getcwd()))
     try:
         main()
     except Exception:
-        pass  # l'hook non deve mai disturbare il prompt
+        pass  # the hook must never disturb the prompt

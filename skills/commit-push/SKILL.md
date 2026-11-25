@@ -13,11 +13,11 @@ ok.
 ## 0. Project rules
 
 ```bash
-python3 "${CLAUDE_SKILL_DIR}/../../shared/project_config.py" playbook
+python3 "${CLAUDE_SKILL_DIR}/../../shared/project_config.py" section commit-push
 ```
 
-If it prints a path, the project's `.claude/config/project.json` names a `playbook` that exists: read it and follow
-its commit-push section. Where the playbook and this skill both speak, the playbook wins, except for the Never list.
+It prints this skill's section of the playbook the project's `.claude/config/project.json` names, and nothing else
+of it: follow it. Where the section and this skill both speak, the section wins, except for the Never list.
 
 ## 1. Look
 

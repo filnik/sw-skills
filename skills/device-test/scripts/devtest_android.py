@@ -398,7 +398,7 @@ class Android:
         return n is not None and any(e.get("focused") == "true" for e in n.el.iter())
 
     def type_keys(self, value: str, paced: bool) -> None:
-        """Gboard (Pixel 9, Android 17) needs both ways. A burst loses the key before a space
+        """Gboard (Pixel, Android 17) needs both ways. A burst loses the key before a space
         ('Garage 12 b' -> 'Garag12 b' three times); one `input` per key (~0.2 s each) types it right but
         is too slow for a search field that recomposes when the first key turns search mode on,
         so the next SPACE clicks the button beside it. So: a burst first, paced keys on the retries."""
@@ -455,7 +455,7 @@ class Android:
             raise Blocked("adb input text only types ASCII: %r" % value)
         seen = ""
         for attempt in (1, 2, 3):
-            # Gboard (Pixel 9, Android 17, on an auto-focused field): keys typed into a
+            # Gboard (Pixel, Android 17, on an auto-focused field): keys typed into a
             # field focused before our tap went to an inactive InputConnection ('commitText on inactive
             # InputConnection'): 'Garage 1' -> 'Garag1', and the retype changed nothing. Hide the keyboard and tap again
             # so the IME binds afresh, before the first try and after every miss.
@@ -804,12 +804,12 @@ class Android:
     def foreground(self):
         """Package that owns the focused window (a system dialog over the app shows here), None when it cannot be read.
         The owner comes from the window list's `package=`, not from the focus line's title: the app's own Compose
-        Popup (its toast) is titled "Pop-Up Window" ("Finestra popup" on the Italian Pixel), which the title regex
+        Popup (its toast) is titled "Pop-Up Window" (or its translation), which the title regex
         read as "Pop", turning a FAIL of the app into BLOCKED."""
         out = self.sh("dumpsys window windows")
         m = re.search(r"mCurrentFocus=Window\{(\w+) \S+ ([^}\n]*)\}", out)
         if not m:
-            # Xiaomi Redmi Note 12S, Android 15: `windows` carries no focus line.
+            # Xiaomi (HyperOS, Android 15): `windows` carries no focus line.
             out = self.sh("dumpsys window") + out
             m = re.search(r"mCurrentFocus=Window\{(\w+) \S+ ([^}\n]*)\}", out)
         if not m:
