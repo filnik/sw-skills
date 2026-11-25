@@ -2,7 +2,7 @@
 """What of a mobile PR was tested on the real phones, from the device-test ledger.
 
 Prints what the PR changes per platform, then one block per scenario × phone run on the PR's builds or named after
-its ticket: each check's latest verdict (dsdev suite rules) and the build it ran on, measured against HEAD.
+its ticket: each check's latest verdict (devtest suite rules) and the build it ran on, measured against HEAD.
 
     tested.py --repo <clone> [--base origin/main] [--ticket PHX-1234]
 """
@@ -14,10 +14,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path.home() / ".claude/skills/device-test/scripts"))
-from dsdev_common import DEVICES  # noqa: E402
-from dsdev_scenario import load  # noqa: E402
-from dsdev_suite import SCENARIOS, current_version, entries, verdicts  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "device-test/scripts"))
+from devtest_common import DEVICES  # noqa: E402
+from devtest_scenario import load  # noqa: E402
+from devtest_suite import SCENARIOS, current_version, entries, verdicts  # noqa: E402
 
 PHONES = ["galaxy", "xiaomi", "pixel", "iphone"]
 SERIALS = {ident: alias for alias, (_, ident) in DEVICES.items()}

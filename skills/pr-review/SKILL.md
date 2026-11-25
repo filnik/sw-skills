@@ -74,7 +74,7 @@ Claude does not read them. `$S` is the Claude session's scratchpad, `<n>` the PR
 - checks: the `AC`s a phone can observe, same IDs, each with its evidence; then 1–3 regression checks `R1…` on the
   flows the diff reaches;
 - phones: the ones the user named; otherwise one Bash call, alone,
-  `python3 ~/.claude/skills/device-test/scripts/dsdev.py --owner pr-review devices`: the Galaxy, plus the iPhone
+  `python3 ~/.claude/skills/device-test/scripts/devtest.py --owner pr-review devices`: the Galaxy, plus the iPhone
   when connected, unless the diff touches one platform only. A phone leased by another owner: ask;
 - worktree = the checkout, owner `codex-pr<n>`, red proof: none unless the user asks (it needs a base build).
 

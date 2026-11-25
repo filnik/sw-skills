@@ -1,9 +1,9 @@
-"""From a test plan to a scenario skeleton (`new`), and from the ledger to the latest verdicts (`report`).
+"""From a test plan to a scenario skeleton (`devtest new`).
 
 A plan, as the skill writes it:
 
     Ticket: SHOP-12 · Cart keeps items after a restart
-    Scenario: new device-tests/SHOP-12.py
+    Scenario: new SHOP-12.py
     Setup: logged in, empty cart
     Checks:
       AC1 add two items and restart the app → the cart shows 2 (tag cart.count)
@@ -73,21 +73,3 @@ def scaffold(plan: str) -> tuple:
     lines += ["", "@S.post", "def restore(d):", "    # undo what pre and the steps changed (prefs, network, data)",
               "    pass", ""]
     return p["out"], "\n".join(lines)
-
-
-def report(entries: list, current_build: str, scenario=None) -> list:
-    """The latest verdict per scenario × phone, one line each, marked when it is from another build."""
-    latest = {}
-    for e in entries:
-        if scenario and e.get("scenario") != scenario:
-            continue
-        latest[(e.get("scenario"), e.get("phone"))] = e
-    out = []
-    for (name, phone), e in sorted(latest.items()):
-        crit = e.get("criteria") or {}
-        passed = sum(1 for v in crit.values() if v == "PASS")
-        others = " · ".join("%s %s" % (c, v.split(" (")[0]) for c, v in crit.items() if v != "PASS")
-        out.append("%s · %s · %s · %s %s · %d PASS%s%s" % (
-            name, phone, e.get("verdict"), e.get("at", "?").replace("T", " "), e.get("build", "?"), passed,
-            " · " + others if others else "", "" if e.get("build") == current_build else " (older build)"))
-    return out

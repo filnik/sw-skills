@@ -22,7 +22,7 @@ reading the history, checking production crashes, and knowing where you are.
 | `/dev:release-notes` | The release notes of a version from every PR merged since the last tag, written for users, in the repo's changelog format. | on your ok |
 | `/dev:disk-cleanup` | Finds regenerable build output in idle projects, stale Xcode and Gradle data and caches, shows a numbered report, deletes only what you pick after re-checking each item. | what you pick |
 | `/dev:memguard` | Installs a background guard that kills a command started by Claude Code or Codex when its memory explodes (20 GB and still growing fast, or 30 GB), before the Mac freezes; tells you what it killed. macOS. | a LaunchAgent, on install |
-| `/dev:device-test` | Tests your app on real phones (Android via adb, iPhone via WebDriverAgent): a scenario runs whole in one call, one line per step, one verdict. Claude writes the plan, the `device-tester` agent runs it. | scenarios in `device-tests/` |
+| `/dev:device-test` | Tests your app on real phones (Android via adb, iPhone via WebDriverAgent): a scenario runs whole in one call, one line per step, one verdict. Claude writes the plan, the `device-tester` agent runs it. | a pack under `skills/device-test/packs/` |
 | `/dev:pr-review` | Reviews a PR end to end through parallel Codex runs: the ticket's requirements and the fit with the app's flow, test coverage, bugs and missed reuse, and the ticket's checks on real phones. Claude writes the brief, verifies every finding against the code and reports one table. | small fixes on your own PR; a pending review on a colleague's, on your ok |
 | `/dev:tested` | Says whether the current PR was tested on the real phones: which check passed on which phone and build, the phones still missing, and whether it needs one phone, two at once or both Android and iOS. Reads the `device-test` ledger and the conversation. | nothing |
 | `/dev:sub-codex` | Hands a well-scoped sub-task to the Codex CLI (`codex exec`) and brings back only its final summary, so the work is paid from the Codex quota. A prompt hook routes medium tasks between Codex and Claude agents by each side's weekly usage. | what the task asks, never git |
@@ -165,14 +165,39 @@ Both servers can also change issues (notes, state); the skill only reads.
 
 ## Testing on real phones
 
-`device-test` needs a `device_test` block in `.claude/config/project.json`: the package or bundle id, the build
-command, the path of the built app, the iOS `team_id`, and an alias for each phone (the full example is in the
-skill). Scenarios live in your project under `device-tests/`, shared steps in `device-tests/flows/`. The skill hands
-the plan to the plugin's agent `dev:device-tester` (Sonnet), which runs `devtest` and returns only the verdict
-table, so the phone output never fills your session.
+`device-test` is an engine plus a pack. The engine (`skills/device-test/scripts/devtest*.py`, Python, stdlib only)
+knows phones: drivers for Android (adb) and iPhone (WebDriverAgent), the scenario DSL and its runner, leases so two
+sessions never drive the same phone, the ledger of verdicts, suites, `lint`, `tags check` and `new`, which turns a
+test plan into a scenario skeleton. It knows nothing about your app.
 
-Requirements: `adb` for Android; for an iPhone, Xcode and the WebDriverAgent sources
-(`npm install --prefix ~/.cache/devtest/ios/wda-src appium-webdriveragent`).
+Everything about one app lives in a pack, a folder under `skills/device-test/packs/<name>/` that git ignores, so it
+never leaves your machine:
+
+    pack.json      package and bundle id, build command, paths of the built app, prefs and DB, iOS team_id,
+                   the phones (alias → serial or UDID), what to dismiss at launch
+    flows/         your shared steps (login, open a project…), imported as `from flows import …` next to the
+                   engine's own (`phone`, `fields`, `state`, `pair`, `storagefiles`)
+    scenarios/     one file per ticket or regression
+    suites/        lists of scenarios to run together
+    hooks.py       optional: what config cannot say (how a feature flag is stored, how to clean test data)
+    runner.md      optional: your app's and phones' quirks, read by the runner after the engine's `runner.md`
+
+With one pack the engine loads it; with several, name one in the project's `.claude/config/project.json`:
+
+    { "device_test": { "pack": "myapp" } }
+
+Any other key of that `device_test` block overrides the same key of `pack.json`. Without a pack the engine still
+lists phones, holds leases, lints and scaffolds, and says that it has no app constants; a command that needs one
+answers BLOCKED with the missing key (`android.package`, `ios.bundle_id`…). `examples/open-app.py` is a scenario
+that needs only those ids: copy it to start.
+
+The skill writes the plan and hands it to the plugin's agent `dev:device-tester` (Sonnet), or to the runner your
+project playbook names; the runner calls `devtest` and returns only the verdict table, so the phone output never
+fills your session.
+
+Requirements: `adb` for Android; for an iPhone, Xcode and the WebDriverAgent sources. When they are missing,
+`devtest wda` stops and prints the `npm install … appium-webdriveragent` line to run (they go into the state
+folder, `~/.cache/devtest` by default).
 
 ## Customizing disk-cleanup
 
@@ -225,6 +250,7 @@ skills/pick/scripts/clickup.py             ClickUp API for pick and ticket (Pyth
 skills/my-prs/scripts/my_prs.py            your open PRs and their next step, one GraphQL call (Python, stdlib only)
 skills/release-notes/scripts/release_prs.py  the PRs between two tags, grouped, batched GraphQL (Python, stdlib only)
 skills/device-test/scripts/devtest*.py     the phone test runner: drivers, scenarios, leases (Python, stdlib only)
+skills/device-test/packs/<name>/           your app's pack: config, flows, scenarios (local, gitignored)
 skills/disk-cleanup/scripts/disk_cleanup.py  scan, numbered plan, re-checked deletion (Python, stdlib only)
 skills/memguard/scripts/memguard.py        the memory guard (Python, stdlib only); install.sh runs it as a LaunchAgent
 skills/pr-review/codex/*.md                the instructions of pr-review's Codex streams

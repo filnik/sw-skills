@@ -1,7 +1,13 @@
-"""Shared pieces of devtest: project config, output contract, leases, log marks, crash verdict, prefs codecs, builds.
+"""Shared pieces of devtest: output contract, the pack and its config, device registry, leases, log marks, the
+prefs codec (androidx DataStore and plist), install receipts.
 
-Exit codes: 0 ok · 1 FAIL (the app did not do what was expected) · 2 BLOCKED (device, tooling or setup) ·
-3 SCENARIO ERROR (the scenario itself is wrong).
+Exit codes: 0 ok, 1 FAIL (the app did not do what was expected), 2 BLOCKED (device, tooling or setup).
+
+Everything about the app under test comes from a pack: packs/<name>/pack.json plus its flows/, scenarios/, suites/,
+hooks.py and runner.md. The pack is the one DEVTEST_PACK names, otherwise `device_test.pack` in the project's
+.claude/config/project.json, otherwise the only folder under packs/. The other keys of that `device_test` block
+override the pack's. Without a pack the engine still runs (leases, raw UI, logs by pattern), and a command that
+needs an app constant stops with BLOCKED and names the key.
 """
 
 from __future__ import annotations
@@ -14,17 +20,15 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-STATE = Path(os.environ.get("DEVTEST_HOME") or Path.home() / ".cache" / "devtest")
-LEASES = STATE / "leases"
-RUNS = STATE / "runs"
-BUILDS = STATE / "builds"
+HERE = Path(__file__).resolve().parent
+PACKS = HERE.parent / "packs"
 UDID_RE = r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{16}|[0-9a-f]{40}"
-CRASH = r"FATAL EXCEPTION|AndroidRuntime: |SIGSEGV|SIGABRT|EXC_BAD_ACCESS|Terminating app due to|Fatal error: "
 
 
 class Fail(Exception):
@@ -44,19 +48,179 @@ def run(cmd, timeout: float = 120, **kw) -> subprocess.CompletedProcess:
         return subprocess.run(cmd, capture_output=True, timeout=timeout, **kw)
     except subprocess.TimeoutExpired:
         raise Blocked("timed out after %ds: %s" % (timeout, " ".join(map(str, cmd))[:200]))
-    except FileNotFoundError:
-        raise Blocked("%s is not installed or not on PATH" % cmd[0])
+
+
+# ---------------------------------------------------------------------------------------- pack and config
+
+def _merge(base: dict, over: dict) -> dict:
+    out = dict(base)
+    for key, value in over.items():
+        out[key] = _merge(out[key], value) if isinstance(value, dict) and isinstance(out.get(key), dict) else value
+    return out
+
+
+def _project_block() -> dict:
+    sys.path.insert(0, str(HERE.parents[2] / "shared"))
+    try:
+        from project_config import project_config
+    except ImportError:
+        return {}
+    return project_config(os.environ.get("DEVTEST_WORKTREE") or None).get("device_test") or {}
+
+
+def load_pack(block: dict, packs: Path = PACKS, named=None) -> tuple:
+    """(the pack's folder or None, its pack.json with the project's device_test block on top)."""
+    block = dict(block)
+    name = named or block.get("pack")
+    block.pop("pack", None)
+    if name == "none":
+        folder = None
+    elif name:
+        folder = Path(name).expanduser() if os.sep in name else packs / name
+    else:
+        found = sorted(packs.glob("*/pack.json"))
+        folder = found[0].parent if len(found) == 1 else None
+    conf = {}
+    if folder:
+        try:
+            conf = json.loads((folder / "pack.json").read_text())
+        except (OSError, ValueError) as e:
+            raise Blocked("device-test pack %s: %s" % (folder, e))
+    return folder, _merge(conf, block)
+
+
+try:
+    PACK, CONFIG = load_pack(_project_block(), named=os.environ.get("DEVTEST_PACK"))
+except Blocked as e:
+    print("BLOCKED: %s" % e, file=sys.stderr)
+    raise SystemExit(2)
+
+
+def cfg(path: str, default=None):
+    """A config value by dotted path: cfg("android.package")."""
+    node = CONFIG
+    for key in path.split("."):
+        if not isinstance(node, dict) or key not in node:
+            return default
+        node = node[key]
+    return node
+
+
+def need(path: str):
+    value = cfg(path)
+    if value in (None, "", [], {}):
+        raise Blocked("no `%s`: set it in %s or in device_test of .claude/config/project.json" % (
+            path, PACK / "pack.json" if PACK else "a pack's pack.json (no pack is loaded)"))
+    return value
+
+
+def app_id(platform: str) -> str:
+    return need("android.package" if platform == "android" else "ios.bundle_id")
+
+
+def pack_dir(name: str):
+    """The pack's scenarios/ or suites/ folder (or the one its `<name>_dir` key gives); None without a pack."""
+    if cfg(name + "_dir"):
+        return Path(cfg(name + "_dir")).expanduser()
+    return PACK / name if PACK else None
+
+
+def launch_rules(platform: str) -> dict:
+    """The pack's `launch` block for one platform: its shared keys with launch.<platform> on top."""
+    block = cfg("launch") or {}
+    return _merge({k: v for k, v in block.items() if k not in ("android", "ios")}, block.get(platform) or {})
+
+
+_hooks = []
+
+
+def hook(name: str):
+    """The function of that name in the pack's hooks.py, or None: what the app needs done in code, not in config."""
+    if not _hooks:
+        module = None
+        if PACK and (PACK / "hooks.py").is_file():
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("devtest_pack_hooks", PACK / "hooks.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        _hooks.append(module)
+    return getattr(_hooks[0], name, None)
+
+
+def _phones() -> tuple:
+    """phones: alias -> {"platform", "id", "name"}, or alias -> id (the platform is read from the id's shape)."""
+    devices, names = {}, {}
+    for alias, phone in (cfg("phones") or {}).items():
+        phone = phone if isinstance(phone, dict) else {"id": phone}
+        ident = phone["id"]
+        devices[alias] = (phone.get("platform") or ("ios" if re.fullmatch(UDID_RE, ident) else "android"), ident)
+        names[alias] = phone.get("name", alias)
+    return devices, names
+
+
+PKG = cfg("android.package") or cfg("ios.bundle_id") or ""
+STATE = Path(os.environ.get("DEVTEST_HOME") or cfg("state_dir") or "~/.cache/devtest").expanduser()
+LEASES = STATE / "leases"
+RUNS = STATE / "runs"
+# The pack's test phones. Any other adb serial or iPhone UDID works too, passed as is.
+DEVICES, NAMES = _phones()
+DEFAULT_FOR = {**{platform: alias for alias, (platform, _) in reversed(list(DEVICES.items()))},
+               **(cfg("default_for") or {})}
+SOURCE_ARCHIVE = cfg("source_archive_marker") or ".devtest-source-archive.json"
+
+
+def notify(text: str) -> None:
+    """Runs the pack's `notifier` with the text, for the person at the Mac; does nothing when there is none."""
+    notifier = cfg("notifier")
+    if notifier:
+        run([str(Path(notifier).expanduser()), text], timeout=15)
 
 
 def text(r: subprocess.CompletedProcess) -> str:
-    out = r.stdout if isinstance(r.stdout, str) else (r.stdout or b"").decode(errors="replace")
-    err = r.stderr if isinstance(r.stderr, str) else (r.stderr or b"").decode(errors="replace")
+    out = r.stdout if isinstance(r.stdout, str) else r.stdout.decode(errors="replace")
+    err = r.stderr if isinstance(r.stderr, str) else r.stderr.decode(errors="replace")
     return (out + err).strip()
 
 
 def short(s: str, n: int = 200) -> str:
-    s = str(s).replace("\n", " ")
+    s = s.replace("\n", " ")
     return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def resolve(name) -> tuple:
+    """Maps an alias, serial or UDID to (platform, id, alias)."""
+    name = name or os.environ.get("DEVTEST_DEVICE")
+    if not name:
+        raise Blocked("no device: pass --device %s (or set DEVTEST_DEVICE)" % ("|".join(DEVICES) or "SERIAL|UDID"))
+    if name in DEVICES:
+        platform, ident = DEVICES[name]
+        return platform, ident, name
+    for alias, (platform, ident) in DEVICES.items():
+        if ident == name:
+            return platform, ident, alias
+    platform = "ios" if re.fullmatch(UDID_RE, name) else "android"
+    return platform, name, name
+
+
+def device_dir(ident: str) -> Path:
+    d = STATE / "dev" / ident
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def fresh_db_dir(device: Path) -> Path:
+    """A new folder for a copy of the app's DB, the earlier copies deleted: each read is a whole copy, used only until
+    the next read, and kept they fill the disk in days."""
+    base = device / "db"
+    if base.is_dir():
+        for old in base.iterdir():
+            if old.is_dir() and not old.is_symlink():
+                shutil.rmtree(old, ignore_errors=True)
+            else:
+                old.unlink(missing_ok=True)
+    dest = base / time.strftime("%Y%m%d-%H%M%S")
+    dest.mkdir(parents=True, exist_ok=True)
+    return dest
 
 
 def load_json(path: Path, default):
@@ -71,69 +235,6 @@ def save_json(path: Path, data) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=1))
     tmp.replace(path)
-
-
-def hhmm(ts: float) -> str:
-    return datetime.fromtimestamp(ts).strftime("%d/%m %H:%M")
-
-
-# ---------------------------------------------------------------------------------------- config
-
-def project_config(start=None) -> tuple:
-    """(project root, device_test block) from the nearest .claude/config/project.json at or above `start`."""
-    here = Path(start or Path.cwd()).expanduser().resolve()
-    for d in [here] + list(here.parents):
-        f = d / ".claude" / "config" / "project.json"
-        if f.is_file():
-            try:
-                return d, json.loads(f.read_text()).get("device_test", {})
-            except ValueError as e:
-                raise Blocked("%s is not valid JSON: %s" % (f, e))
-    return here, {}
-
-
-def need(cfg: dict, platform: str, key: str):
-    value = (cfg.get(platform) or {}).get(key)
-    if not value:
-        raise Blocked("set device_test.%s.%s in .claude/config/project.json" % (platform, key))
-    return value
-
-
-def platform_of(ident: str) -> str:
-    return "ios" if re.fullmatch(UDID_RE, ident) else "android"
-
-
-def resolve(name, phones: dict) -> tuple:
-    """(platform, id, alias) for an alias of device_test.phones, an adb serial or an iPhone UDID."""
-    name = name or os.environ.get("DEVTEST_DEVICE")
-    if not name:
-        raise Blocked("no device: pass --device ALIAS|SERIAL|UDID (configured: %s)" % (", ".join(phones) or "none"))
-    ident = phones.get(name, name)
-    alias = name if name in phones else next((a for a, i in phones.items() if i == name), name)
-    return platform_of(ident), ident, alias
-
-
-def default_phone(platform: str, phones: dict) -> str:
-    for alias, ident in phones.items():
-        if platform_of(ident) == platform:
-            return alias
-    raise Blocked("no %s phone in device_test.phones: pass --device" % platform)
-
-
-def device_dir(ident: str) -> Path:
-    d = STATE / "dev" / ident
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def fresh_db_dir(device: Path) -> Path:
-    """A new folder for a copy of the app's DB, the earlier copies deleted: each copy is only good until the next."""
-    base = device / "db"
-    if base.is_dir():
-        shutil.rmtree(base, ignore_errors=True)
-    dest = base / time.strftime("%Y%m%d-%H%M%S")
-    dest.mkdir(parents=True, exist_ok=True)
-    return dest
 
 
 # ---------------------------------------------------------------------------------------- leases
@@ -156,54 +257,66 @@ def _lease_file(ident: str) -> Path:
 
 def current_lease(ident: str):
     lease = load_json(_lease_file(ident), None)
-    return lease if lease and lease.get("expires", 0) > time.time() else None
+    if lease and lease.get("expires", 0) > time.time():
+        return lease
+    return None
 
 
 def parse_ttl(ttl: str) -> int:
     m = re.fullmatch(r"(\d+)([smh]?)", ttl)
     if not m:
-        raise Blocked("bad duration %s: use 90m, 2h, 600s" % ttl)
+        raise Blocked("bad --ttl %s: use 90m, 2h, 600s" % ttl)
     return int(m.group(1)) * {"": 60, "s": 1, "m": 60, "h": 3600}[m.group(2)]
-
-
-def until(ts: float) -> str:
-    return datetime.fromtimestamp(ts).strftime("%H:%M")
 
 
 def lease_acquire(ident: str, alias: str, who: str, ttl: str, note: str) -> None:
     if not who:
-        raise Blocked("pass --owner <session name> on every call")
-    from devtest_phones import holder
+        raise Blocked("pass --owner <session name> (or set DEVTEST_OWNER)")
     with _lease_lock():
         lease = current_lease(ident)
         if lease and lease["owner"] != who:
-            raise Blocked("%s is leased by %s until %s (%s)" % (alias, lease["owner"], until(lease["expires"]),
-                                                                lease.get("note", "")))
+            raise Blocked("%s is leased by %s until %s (%s)" % (
+                alias, lease["owner"], datetime.fromtimestamp(lease["expires"]).strftime("%H:%M"), lease.get("note", "")))
         expires = time.time() + parse_ttl(ttl)
-        save_json(_lease_file(ident), dict(holder(), owner=who, alias=alias, expires=expires, note=note,
-                                           since=(lease or {}).get("since", time.time())))
-    say("lease %s -> %s until %s" % (alias, who, until(expires)))
+        from devtest_phones import holder  # which session holds it: `devices --json` shows whether it still works
+        save_json(_lease_file(ident), {"owner": who, "alias": alias, "expires": expires, "note": note,
+                                       "since": (lease or {}).get("since", time.time()), **holder()})
+    say("lease %s -> %s until %s" % (alias, who, datetime.fromtimestamp(expires).strftime("%H:%M")))
 
 
 def lease_release(ident: str, alias: str, who: str, force: bool) -> None:
     with _lease_lock():
         lease = current_lease(ident)
         if lease and lease["owner"] != who and not force:
-            raise Blocked("%s is leased by %s, not by %s (--force only if that session is gone)" % (
+            raise Blocked("%s is leased by %s, not by %s (use --force only if that session is gone)" % (
                 alias, lease["owner"], who or "you"))
         _lease_file(ident).unlink(missing_ok=True)
     say("lease %s released" % alias)
 
 
+def lease_status() -> None:
+    rows = []
+    # Phones with no alias are leased by their serial or UDID: list those too.
+    known = {ident for _, ident in DEVICES.values()}
+    others = sorted(p.stem for p in LEASES.glob("*.json") if p.stem not in known)
+    for alias, ident in [(a, i) for a, (_, i) in DEVICES.items()] + [("-", s) for s in others]:
+        lease = current_lease(ident)
+        if alias == "-" and not lease:
+            continue
+        rows.append("%-7s %-26s %s" % (alias, ident, "free" if not lease else "%s until %s %s" % (
+            lease["owner"], datetime.fromtimestamp(lease["expires"]).strftime("%H:%M"), lease.get("note", ""))))
+    say("\n".join(rows))
+
+
 def check_lease(ident: str, alias: str) -> None:
-    """Device-touching commands refuse a phone that another owner holds."""
+    """Device-touching commands refuse a device that another owner holds."""
     lease = current_lease(ident)
     if lease and lease["owner"] != owner():
         raise Blocked("%s is leased by %s until %s: wait, or ask that session to release it" % (
-            alias, lease["owner"], until(lease["expires"])))
+            alias, lease["owner"], datetime.fromtimestamp(lease["expires"]).strftime("%H:%M")))
 
 
-# ---------------------------------------------------------------------------------------- marks and logs
+# ---------------------------------------------------------------------------------------- marks
 
 def marks_file(ident: str) -> Path:
     return device_dir(ident) / "marks.json"
@@ -220,6 +333,8 @@ def set_mark(ident: str, log: Path, name: str) -> int:
 def mark_offset(ident: str, log: Path, name) -> int:
     if not name:
         return 0
+    if isinstance(name, int):
+        return name
     m = load_json(marks_file(ident), {}).get(name)
     if m is None:
         raise Blocked("unknown mark %s: set it with `mark %s` before the action" % (name, name))
@@ -236,8 +351,30 @@ def read_since(log: Path, offset: int) -> list:
         return f.read().decode(errors="replace").splitlines()
 
 
+LOG_PRESETS = {
+    "crash": r"FATAL EXCEPTION|AndroidRuntime|SIGSEGV|EXC_BAD_ACCESS|Terminating app",
+    "baa": r"Baa started on ws://",
+    **(cfg("log_presets") or {}),
+}
+
+
+def crash_verdict(lines: list, alive: bool) -> None:
+    """Raises for a crash in these log lines: Blocked when the build is older than the data on the phone."""
+    text_ = "\n".join(lines)
+    m = re.search(r"A migration from (\d+) to (\d+) was required", text_)
+    if m and int(m.group(1)) > int(m.group(2)):
+        raise Blocked("the app crashed on a database newer than this build (v%s -> v%s): install a build at least as "
+                      "new as the data, or reinstall clean (that logs out)" % (m.group(1), m.group(2)))
+    hits = grep_lines(lines, "crash")
+    if hits:
+        reason = next((l for l in hits if "reason:" in l or "Exception" in l), hits[0])
+        raise Fail("app crashed: %s" % short(reason.strip(), 400))
+    if not alive:
+        raise Fail("app process is gone (no crash line in the log)")
+
+
 def grep_lines(lines: list, pattern: str) -> list:
-    rx = re.compile(CRASH if pattern == "crash" else pattern, re.I)
+    rx = re.compile(LOG_PRESETS.get(pattern, pattern), re.I)
     return [l for l in lines if rx.search(l)]
 
 
@@ -252,22 +389,7 @@ def wait_log(log: Path, offset: int, pattern: str, timeout: float, poll: float =
         time.sleep(poll)
 
 
-def crash_verdict(lines: list, alive: bool) -> None:
-    """Raises for a crash in these log lines; BLOCKED when the build is older than the data on the phone."""
-    m = re.search(r"A migration from (\d+) to (\d+) was required", "\n".join(lines))
-    if m and int(m.group(1)) > int(m.group(2)):
-        raise Blocked("the app crashed on a database newer than this build (v%s -> v%s): install a build at least as "
-                      "new as the data, or reinstall clean" % (m.group(1), m.group(2)))
-    hits = grep_lines(lines, "crash")
-    if hits:
-        reason = next((l for l in hits if "reason:" in l or "Exception" in l), hits[0])
-        raise Fail("app crashed: %s" % short(reason.strip(), 400))
-    if not alive:
-        raise Fail("app process is gone (no crash line in the log)")
-
-
-# ---------------------------------------------------------------------------------------- prefs
-# androidx DataStore Preferences (protobuf) or a property list (NSUserDefaults), told apart by their first bytes.
+# ---------------------------------------------------------------------------------------- DataStore
 
 def _varint(buf: bytes, i: int) -> tuple:
     shift = result = 0
@@ -307,7 +429,7 @@ def _fields(buf: bytes):
         elif wire == 5:
             val, i = buf[i:i + 4], i + 4
         else:
-            raise Blocked("unsupported protobuf wire type %d in the prefs file" % wire)
+            raise Blocked("unsupported protobuf wire type %d in the DataStore file" % wire)
         yield num, wire, val
 
 
@@ -316,9 +438,10 @@ def _is_plist(buf: bytes) -> bool:
 
 
 def decode_prefs(buf: bytes) -> dict:
+    """A plist, or PreferenceMap { map<string, Value> preferences = 1 } of androidx DataStore."""
     if _is_plist(buf):
         return plistlib.loads(buf)
-    out = {}  # PreferenceMap { map<string, Value> preferences = 1 }
+    out = {}
     for num, _, entry in _fields(buf):
         if num != 1:
             continue
@@ -327,7 +450,7 @@ def decode_prefs(buf: bytes) -> dict:
             if n == 1:
                 key = v.decode()
             elif n == 2:
-                for vn, _, vv in _fields(v):
+                for vn, vw, vv in _fields(v):
                     if vn == 1:
                         value = bool(vv)
                     elif vn == 2:
@@ -351,8 +474,9 @@ def _len_field(num: int, payload: bytes) -> bytes:
     return _put_varint((num << 3) | 2) + _put_varint(len(payload)) + payload
 
 
-def encode_pref(buf: bytes, key: str, value) -> bytes:
-    """The prefs file with `key` set to a string value, or removed when value is None."""
+def encode_string_pref(buf: bytes, key: str, value) -> bytes:
+    """Rewrites the prefs with `key` set to a string value, or removed when value is None. An app that stores its
+    keys as JSON strings takes a Boolean as the string "true"."""
     if _is_plist(buf):
         data = plistlib.loads(buf)
         data.pop(key, None)
@@ -363,19 +487,28 @@ def encode_pref(buf: bytes, key: str, value) -> bytes:
     for num, wire, entry in _fields(buf):
         if num == 1 and any(n == 1 and v.decode() == key for n, _, v in _fields(entry)):
             continue
-        if wire != 2:
+        if wire == 2:
+            kept += _len_field(num, entry)
+        else:
             raise Blocked("unexpected top-level field %d in the DataStore file" % num)
-        kept += _len_field(num, entry)
     if value is None:
         return kept
-    entry = _len_field(1, key.encode()) + _len_field(2, _len_field(5, str(value).encode()))
+    val = _len_field(5, value.encode())
+    entry = _len_field(1, key.encode()) + _len_field(2, val)
     return kept + _len_field(1, entry)
 
 
 def format_prefs(prefs: dict, flt) -> list:
-    return ["%s = %s" % (k, short(v if isinstance(v, str) else json.dumps(v, default=str), 160))
-            for k, v in sorted(prefs.items()) if not flt or flt.lower() in k.lower()]
+    rows = []
+    for k in sorted(prefs):
+        if flt and flt.lower() not in k.lower():
+            continue
+        v = prefs[k]
+        rows.append("%s = %s" % (k, short(v if isinstance(v, str) else json.dumps(v), 160)))
+    return rows
 
+
+# ---------------------------------------------------------------------------------------- sqlite
 
 def sqlite_query(db: Path, sql: str, limit: int = 40) -> list:
     r = run(["sqlite3", "-header", "-separator", " | ", str(db), sql], timeout=60, text=True)
@@ -387,81 +520,67 @@ def sqlite_query(db: Path, sql: str, limit: int = 40) -> list:
     return rows
 
 
-# ---------------------------------------------------------------------------------------- worktree and builds
+# ---------------------------------------------------------------------------------------- worktree
 
-# Changes that do not reach the app build: scenarios, tests, docs, agent config.
-NOT_IN_BUILD = re.compile(r"(^|/)(device-tests|\.claude|docs|tests?|[A-Za-z]*Tests?|\w+[_-]tests?)/|\.md$")
+NOT_IN_BUILD = re.compile(cfg("not_in_build") or r"(^|/)(\.claude|docs|tests?|[A-Za-z]*Tests?|\w+[_-]tests?)/|\.md$")
+
+
+def source_archive(top: Path):
+    """A folder of sources made with `git archive`, marked by a manifest, stands in for a clone of the repo."""
+    marker = top / SOURCE_ARCHIVE
+    if not marker.exists():
+        return None
+    rec = load_json(marker, {})
+    if (rec.get("kind") != "git-archive" or not re.fullmatch(r"[0-9a-f]{40}", rec.get("commit", ""))
+            or not isinstance(rec.get("prepared_at"), (int, float)) or not (top / (cfg("source_dir") or ".")).is_dir()):
+        raise Blocked("invalid source archive manifest: %s" % marker)
+    return rec
 
 
 def worktree(arg=None) -> Path:
     cwd = Path(arg).expanduser().resolve() if arg else Path.cwd()
+    if source_archive(cwd):
+        return cwd
     r = run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"], text=True)
     if r.returncode != 0:
-        raise Blocked("%s is not inside a git checkout: pass --worktree" % cwd)
-    return Path(r.stdout.strip())
-
-
-def head(top: Path) -> str:
-    return run(["git", "-C", str(top), "rev-parse", "--short", "HEAD"], text=True).stdout.strip() or "unknown"
+        raise Blocked("%s is not inside a clone of the app's repo: pass --worktree" % cwd)
+    top = Path(r.stdout.strip())
+    if cfg("source_dir") and not (top / cfg("source_dir")).is_dir():
+        raise Blocked("%s has no %s/ folder" % (top, cfg("source_dir")))
+    return top
 
 
 def worktree_changed_at(top: Path) -> float:
-    """Newest of the HEAD commit time and the mtime of every modified or untracked file that goes into the build."""
-    newest = float(run(["git", "-C", str(top), "log", "-1", "--format=%ct"], text=True).stdout.strip() or 0)
-    status = run(["git", "-C", str(top), "status", "--porcelain", "--untracked-files=all"], text=True).stdout
-    for line in status.splitlines():
+    """Newest of: HEAD commit time and mtime of every modified/untracked source file that goes into the build."""
+    archive = source_archive(top)
+    if archive:
+        return max(archive["prepared_at"], (top / SOURCE_ARCHIVE).stat().st_mtime)
+    r = run(["git", "-C", str(top), "log", "-1", "--format=%ct"], text=True)
+    newest = float(r.stdout.strip() or 0)
+    r = run(["git", "-C", str(top), "status", "--porcelain", "--", cfg("source_dir") or "."], text=True)
+    suffixes = cfg("build_suffixes")
+    for line in r.stdout.splitlines():
         rel = line[3:].split(" -> ")[-1].strip('"')
+        if NOT_IN_BUILD.search(rel):
+            continue
         path = top / rel
-        if not NOT_IN_BUILD.search(rel) and path.is_file():
+        if (not suffixes or path.suffix in suffixes) and path.is_file():
             newest = max(newest, path.stat().st_mtime)
     return newest
 
 
-def newest_mtime(path: Path) -> float:
-    """A file's mtime; for a bundle folder (.app), the newest of its top-level entries (executable, Info.plist)."""
-    if path.is_dir():
-        return max([path.stat().st_mtime] + [p.stat().st_mtime for p in path.iterdir()])
-    return path.stat().st_mtime
-
-
-def build(top: Path, platform: str, cfg: dict) -> str:
-    """Runs device_test.<platform>.build in the worktree; the artifact is device_test.android.apk / ios.app."""
-    command = need(cfg, platform, "build")
-    artifact = top / need(cfg, platform, "apk" if platform == "android" else "app")
-    BUILDS.mkdir(parents=True, exist_ok=True)
-    log = BUILDS / ("%s-%s.log" % (top.name, platform))
-    started = time.time()
-    with open(log, "w") as f:
-        code = subprocess.call(command, shell=True, cwd=str(top), stdout=f, stderr=subprocess.STDOUT)
-    minutes = (time.time() - started) / 60
-    if code != 0 or not artifact.exists():
-        lines = log.read_text(errors="replace").splitlines()
-        errors = [l.strip() for l in lines if re.search(r"(^e: |\berror\b|FAILED|What went wrong)", l, re.I)]
-        why = " / ".join(dict.fromkeys(errors[:6])) or "no %s after the build" % artifact
-        raise Blocked("build failed (exit %d) after %.1f min: %s (log %s)" % (code, minutes, short(why, 600), log))
-    # An up-to-date build keeps the artifact's old mtime: record when the build checked its inputs.
-    save_json(BUILDS / ("%s-%s.json" % (top.name, platform)), {
-        "worktree": str(top), "started": started, "artifact_mtime": newest_mtime(artifact), "commit": head(top)})
-    return "built in %.1f min: %s" % (minutes, artifact)
-
-
-def install_receipt(top: Path, platform: str, artifact: Path, **extra) -> dict:
-    commit, mtime = head(top), newest_mtime(artifact)
-    b = load_json(BUILDS / ("%s-%s.json" % (top.name, platform)), {})
-    started = b.get("started", 0) if (b.get("worktree") == str(top) and b.get("commit") == commit
-                                      and b.get("artifact_mtime") == mtime) else 0
-    return dict(extra, worktree=str(top), commit=commit, artifact_mtime=mtime, build_started=started,
-                installed_at=time.time())
-
-
 def stale_reason(rec, top: Path, changed_at: float) -> str:
-    """'' when the installed build is the worktree's latest, otherwise why it is not."""
+    """'' when the installed build (an install receipt) is the worktree's latest, otherwise why it is not."""
     if not rec:
         return "no build installed by devtest: run `deploy` from the worktree under test"
     if Path(rec["worktree"]) != top:
         return "the phone runs a build of %s, not of %s" % (Path(rec["worktree"]).name, top.name)
-    built = max(rec["artifact_mtime"], rec.get("build_started", 0))
+    built = max(rec.get("apk_mtime") or rec.get("app_mtime") or 0, rec.get("build_started_at") or 0)
     if built < changed_at:
         return "the installed build (%s) is older than the last change in %s (%s): deploy again" % (
             hhmm(built), top.name, hhmm(changed_at))
     return ""
+
+
+def hhmm(ts: float) -> str:
+    return datetime.fromtimestamp(ts).strftime("%d/%m %H:%M")

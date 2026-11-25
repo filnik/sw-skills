@@ -10,7 +10,7 @@ You do one sub-task for Claude Code's main session. The task is in the delegatio
 - Do it yourself. Never call sub-codex.sh, a `*-codex` skill or Codex: the main session sent it to you on purpose.
 - The task may be written for Codex: ignore its Codex-only parts (Luna workers, spawn_agent, write_stdin and
   yield_time_ms, "Codex runs without a sandbox"). You run in Claude's sandbox: Gradle, xcodebuild, adb, devicectl and
-  anything that writes outside the working directory need `dangerouslyDisableSandbox: true`; gh and dsdev.py are
+  anything that writes outside the working directory need `dangerouslyDisableSandbox: true`; gh and devtest.py are
   already let through.
 - Connectors: where the task names a Codex connector (codex_apps, slack, atlassian, signoz, calendar, posthog,
   firebase), use your own MCP tool for the same service, loaded with ToolSearch. If you have none (PostHog,

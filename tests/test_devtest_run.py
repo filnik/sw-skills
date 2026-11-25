@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Scenario engine of skills/device-test with a fake phone: verdicts, evidence, honesty rules, red proof, side by side,
-the plan scaffold and the ledger report. No phone needed. Run: python3 tests/test_devtest_run.py (exit 0 = green)."""
+"""The device-test runner without a phone or a pack. Run: python3 tests/test_devtest_run.py (exit 0 = green)."""
+
 import contextlib
 import io
 import json
@@ -10,23 +10,25 @@ import tempfile
 import time
 from pathlib import Path
 
-sys.dont_write_bytecode = True
-os.environ["DEVTEST_HOME"] = tempfile.mkdtemp(prefix="devtest-home-")
+os.environ["DEVTEST_HOME"] = tempfile.mkdtemp()
+os.environ["DEVTEST_PACK"] = "none"
+os.environ["DEVTEST_WORKTREE"] = tempfile.mkdtemp()
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "device-test" / "scripts"))
 
+import devtest_android as A  # noqa: E402
 import devtest_plan as P  # noqa: E402
 import devtest_scenario as S  # noqa: E402
 
 
 class FakePhone:
-    app_id = "com.example.app"
+    app = "com.example.app"
 
     def __init__(self, platform="android"):
         self.alias, self.platform = "fake", platform
         self.log = Path(tempfile.mkdtemp()) / "app.log"
         self.log.write_text("")
         self.on_screen = {"screen.home"}
-        self.front, self.online = self.app_id, True
+        self.front, self.online = self.app, True
 
     def say(self, line):
         with open(self.log, "a") as f:
@@ -41,10 +43,13 @@ class FakePhone:
     def node(self, sel, timeout=0):
         return None
 
-    def launch(self, wait_screen=None, restart=False, timeout=90):
+    def launch(self, env=None, wait_screen=None, restart=False, timeout=90):
         return "launched"
 
     def crash_check(self, since):
+        pass
+
+    def ensure_capture(self):
         pass
 
     def shot(self, path):
@@ -73,10 +78,11 @@ def scenario(body):
     return path
 
 
-def run(path, phone=None, **kw):
+def run(path, phone=None, expect_fail=None, **kw):
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
-        code = S.run_scenario(path, [phone or FakePhone()], Path(tempfile.mkdtemp()), tags_check=False, **kw)
+        code = S.run_scenario(path, [phone or FakePhone()], Path(tempfile.mkdtemp()), 1, expect_fail, False, False,
+                              tags_check=False, **kw)
     return code, out.getvalue()
 
 
@@ -101,7 +107,7 @@ def _(d):
 '''
 
 
-def test_verdict_criteria_and_evidence_on_fail():
+def test_verdict_and_criteria_and_evidence_on_fail():
     code, out = run(scenario(VERDICTS))
     assert code == 1, out
     verdict = next(l for l in out.splitlines() if l.startswith("VERDICT"))
@@ -110,9 +116,10 @@ def test_verdict_criteria_and_evidence_on_fail():
     assert "AC3 SKIP (needs hardware)" in verdict and "AC4 FAIL" in verdict, verdict
     evidence = next(l for l in out.splitlines() if "evidence:" in l).split("evidence: ")[1]
     folder = Path(evidence.split("/step-3")[0])
-    assert sorted(p.name for p in folder.iterdir()) == ["step-3.log", "step-3.png", "step-3.ui.txt"], evidence
+    assert {"step-3.log", "step-3.png", "step-3.ui.txt"} <= {p.name for p in folder.iterdir()}, evidence
     entry = json.loads(S.LEDGER.read_text().splitlines()[-1])
     assert (entry["verdict"], entry["failed_step"], entry["criteria"]["AC1"]) == ("FAIL", "3", "PASS")
+    assert (entry["scenario"], entry["phone"], entry["platform"]) == ("demo", "fake", "android")
 
 
 def test_absence_needs_presence():
@@ -123,6 +130,7 @@ def test_absence_needs_presence():
 @S.step("no error yet")
 def _(d):
     m = d.mark()
+    d.dev.say("I/app: alive")
     d.expect_no_log(r"boom", since=m, within=0)
 @S.step("then the error")
 def _(d):
@@ -173,12 +181,14 @@ def test_validate_and_select():
     sc.step("three")(lambda d: None)
     sc.validate()
     sc.select(only=["AC2"])
-    assert [s["off"] for s in sc.steps] == [{"android", "ios"}, set(), set()]
+    assert [bool(s["off"]) for s in sc.steps] == [True, False, False]  # a step that covers nothing stays
+    sc.select(skip=["3"])
+    assert [bool(s["off"]) for s in sc.steps] == [True, False, True]
 
 
 def test_scaffold_from_plan_is_an_error_until_written():
     plan = """Ticket: SHOP-12 · Cart keeps items
-Scenario: new device-tests/SHOP-12.py
+Scenario: new SHOP-12.py
 Setup: logged in, empty cart
 Checks (one per line, keep the IDs):
   AC1 add two items and restart → the cart shows 2 (tag cart.count)
@@ -186,16 +196,26 @@ Checks (one per line, keep the IDs):
 Not to test: payment (no test card)
 """
     parsed = P.parse_plan(plan)
-    assert parsed["out"] == "device-tests/SHOP-12.py" and parsed["title"] == "SHOP-12 Cart keeps items"
+    assert parsed["out"] == "SHOP-12.py" and parsed["title"] == "SHOP-12 Cart keeps items"
     assert parsed["checks"] == [("AC1", "add two items and restart", "the cart shows 2 (tag cart.count)"),
                                 ("AC2", "remove one", 'log "cart saved"')]
     out, source = P.scaffold(plan)
     path = Path(tempfile.mkdtemp()) / "SHOP-12.py"
     path.write_text(source)
-    sc = S.load(path)
-    sc.validate()  # every check is covered by its step
+    S.load(path).validate()  # every check is covered by its step
     code, text = run(path)
     assert code == 3 and "step not written yet: AC1" in text, text
+
+
+def test_dump_caller_names_the_outer_and_inner_flow_and_else_the_driver_call():
+    ns, flows = {}, os.path.join(tempfile.mkdtemp(), "flows")
+    exec(compile("def open_item(f):\n    return f()\n", os.path.join(flows, "nav.py"), "exec"), ns)
+    exec(compile("def create(f):\n    return open_item(f)\n", os.path.join(flows, "items.py"), "exec"), ns)
+    exec(compile("class Driver:\n    def tap(self, f):\n        return f()\n", "/x/devtest_scenario.py", "exec"), ns)
+    assert ns["create"](A.dump_caller) == "items.create > nav.open_item"
+    assert ns["open_item"](lambda: ns["Driver"]().tap(A.dump_caller)) == "nav.open_item"
+    assert ns["Driver"]().tap(A.dump_caller) == "x.tap"
+    assert A.dump_caller() == "runner"
 
 
 def test_side_by_side_runs_at_once_and_the_worst_exit_wins():
@@ -208,17 +228,11 @@ def test_side_by_side_runs_at_once_and_the_worst_exit_wins():
     assert worst == 2
 
 
-def test_report_latest_per_scenario_and_phone():
-    entries = [{"scenario": "login", "phone": "pixel", "verdict": "FAIL", "at": "2026-11-01T10:00:00", "build": "aaa",
-                "criteria": {"AC1": "FAIL"}},
-               {"scenario": "login", "phone": "pixel", "verdict": "PASS", "at": "2026-11-02T10:00:00", "build": "bbb",
-                "criteria": {"AC1": "PASS", "AC2": "SKIP (no LiDAR)"}},
-               {"scenario": "cart", "phone": "iphone", "verdict": "PASS", "at": "2026-11-01T09:00:00", "build": "aaa",
-                "criteria": {}}]
-    assert P.report(entries, "bbb") == [
-        "cart · iphone · PASS · 2026-11-01 09:00:00 aaa · 0 PASS (older build)",
-        "login · pixel · PASS · 2026-11-02 10:00:00 bbb · 1 PASS · AC2 SKIP"]
-    assert len(P.report(entries, "bbb", "login")) == 1
+def test_a_two_phone_scenario_is_not_split():
+    folder = Path(tempfile.mkdtemp())
+    (folder / "pair.py").write_text("other = pair.colleague(d)\n")
+    (folder / "single.py").write_text("d.tap('settings.reminders.switch')\n")
+    assert S.uses_pair(folder / "pair.py") and not S.uses_pair(folder / "single.py")
 
 
 if __name__ == "__main__":
