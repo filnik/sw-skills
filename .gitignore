@@ -2,3 +2,5 @@ __pycache__/
 .DS_Store
 .idea/
 .claude/
+# Private device-test packs (app scenarios, flows, phones) stay local
+skills/device-test/packs/

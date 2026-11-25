@@ -58,6 +58,49 @@ def test_copilot_line():
     assert "not reviewed since" in bs.copilot_line([review], [], "def")
 
 
+def test_copilot_request_line_and_its_auto_review_bases():
+    review = {"author": {"login": "copilot-pull-request-reviewer"}, "commit": {"oid": "abc"}}
+    asked = [{"requestedReviewer": {"login": "Copilot"}}]
+    config = {"request": True, "auto_review_bases": ["main"]}
+    assert bs.copilot_line([], [], "abc", "feature", config) == "copilot  no review yet · request it"
+    assert bs.copilot_line([review], [], "def", "feature", config).endswith("not reviewed since) · request it")
+    assert not bs.copilot_line([review], [], "def", "main", config).endswith("request it"), "the ruleset reviews it"
+    assert bs.copilot_line([review], asked, "def", "feature", config).endswith("requested, pending")
+    assert not bs.copilot_line([review], [], "def", "feature").endswith("request it"), "no config, no request"
+
+
+def test_ignored_checks_and_boilerplate_comments_are_only_counted():
+    rollup = {"contexts": {"nodes": [{"name": "PR Safeness / assess", "conclusion": "FAILURE"},
+                                     {"name": "build", "conclusion": "SUCCESS"}]}}
+    assert bs.ci_lines(rollup, ["pr safeness"]) == ["ci       1 ok · 0 failed · 0 pending · 1 ignored by config"]
+    comments = [{"databaseId": 1, "author": {"login": "bot"}, "body": "<!-- preview-builds-hint -->Try it"},
+                {"databaseId": 2, "author": {"login": "alice"}, "body": "Real point"}]
+    kept, dropped = bs.without_boilerplate(comments, ["<!-- preview-builds-hint -->"])
+    assert [c["databaseId"] for c in kept] == [2] and dropped == ["bot"]
+    assert bs.without_boilerplate(comments, []) == (comments, [])
+
+
+def test_legacy_ledger_seen_ids_come_back_as_shown_and_not_answered():
+    import json
+    import tempfile
+    real = bs.STATE
+    bs.STATE = Path(tempfile.mkdtemp())
+    try:
+        (bs.STATE / "o_r_7.json").write_text(json.dumps({"seen": ["c10", "ic5"]}))
+        _, seen, shown = bs.load_state("o", "r", 7)
+        assert seen == set() and shown == {"c10", "ic5"}, (seen, shown)
+        (bs.STATE / "o_r_7.json").write_text(json.dumps({"seen": ["c10"], "shown": ["c10", "ic5"]}))
+        _, seen, shown = bs.load_state("o", "r", 7)
+        assert seen == {"c10"} and shown == {"c10", "ic5"}
+    finally:
+        bs.STATE = real
+
+
+def test_indent_cuts_at_width():
+    assert bs.indent("abcdef", 3) == "    abc …"
+    assert bs.indent("a\nb") == "    a\n    b"
+
+
 def test_reviewer_reply_reopens_an_answered_thread():
     ours, seen = {"me"}, {"c10", "rv2"}
     answered, = bs.build_items([thread(10, ["alice", "me"])], [], [], ours)[0]

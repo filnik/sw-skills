@@ -27,6 +27,9 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "shared"))
+import project_config as shared_config  # noqa: E402
+
 API = "https://api.clickup.com/api/v2"
 TOKEN_HOSTS = ("clickup.com", "clickup-attachments.com")  # the only hosts the token is ever sent to
 IN_PROGRESS = re.compile(r"progress|doing|develop|working|started", re.I)
@@ -34,12 +37,10 @@ IN_PROGRESS = re.compile(r"progress|doing|develop|working|started", re.I)
 
 def project_config():
     """(project root, clickup config) from the nearest .claude/config/project.json upward."""
-    here = Path.cwd().resolve()
-    for d in [here, *here.parents]:
-        f = d / ".claude" / "config" / "project.json"
-        if f.is_file():
-            return d, json.loads(f.read_text()).get("clickup", {})
-    return here, {}
+    path, cfg = shared_config.find()
+    if not path:
+        return Path.cwd().resolve(), {}
+    return shared_config.project_root(path), cfg.get("clickup", {})
 
 
 def read_token(root, cfg):

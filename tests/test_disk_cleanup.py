@@ -24,6 +24,9 @@ spec.loader.exec_module(dc)
 H = dc.HOME
 assert H == TMP / "home", H
 OLD = time.time() - 30 * 86400
+KAP = TMP / "kap-temp"  # stands for the per-user temp dir Kap records into
+KAP.mkdir()
+dc.user_temp = lambda: KAP
 
 
 def age(root, ts=OLD):
@@ -39,9 +42,9 @@ def write(p, text="x"):
     p.write_text(text)
 
 
-def repo(name):
+def repo(name, parent=None):
     """A checkout idle for 30 days: src.js and lib/a.js tracked, node_modules ignored."""
-    r = H / "code" / name
+    r = (parent or H / "code") / name
     dates = "%d +0000" % OLD
     env = {**os.environ, "GIT_AUTHOR_DATE": dates, "GIT_COMMITTER_DATE": dates}
 
@@ -197,6 +200,168 @@ def test_keep_below_and_fence_of_remove():
         assert (H / "Downloads/shut").stat().st_mode & 0o777 == 0o555, "the parent's permissions are untouched"
     finally:
         os.chmod(H / "Downloads/shut", 0o755)
+
+
+def configured(block):
+    """The test body runs with this disk_cleanup config, and with none afterwards."""
+    @contextlib.contextmanager
+    def scope():
+        dc.configure(None, block)
+        try:
+            yield
+        finally:
+            dc.configure(None, {})
+    return scope()
+
+
+def pushed(name, parent):
+    """A pool checkout whose commits are on a remote too."""
+    r, g = repo(name, parent)
+    g("update-ref", "refs/remotes/origin/main", "HEAD")
+    age(r)
+    return r
+
+
+def test_kap_exported_go_after_two_days_and_the_rest_after_five():
+    ended = int(time.time() - 3 * dc.DAY)
+    export = KAP / ("e" * 32)
+    write(export / time.strftime("Kapture %Y-%m-%d at %H.%M.%S.mp4", time.localtime(ended)))
+    write(export / ".DS_Store")
+    age(export, time.time() - 3 * dc.DAY)
+    for name, days in (("a", 3), ("b", 3.5), ("c", 6)):  # a ended when the export says: exported
+        write(KAP / (name * 32 + ".mp4"))
+        age(KAP / (name * 32 + ".mp4"), time.time() - days * dc.DAY)
+    age(KAP / ("a" * 32 + ".mp4"), ended)
+    write(KAP / "other.mp4")
+    age(KAP / "other.mp4")
+    got = sorted(p.name for p, *_ in dc.kap_temp(5, 2))
+    assert got == ["a" * 32 + ".mp4", "c" * 32 + ".mp4", "e" * 32], got
+
+
+def test_kap_fence_lets_through_only_kap_files_at_the_top_of_the_temp_dir():
+    export, other = KAP / ("d" * 32), KAP / ("f" * 32)
+    write(export / "Kapture 2026-11-08 at 21.29.50.mp4")
+    write(other / "notes.txt")
+    fenced = lambda p, kind: dc.fenced({"cat": "recordings", "path": str(p), "kind": kind})
+    assert fenced(KAP / ("a" * 32 + ".mp4"), "file") and fenced(export, "dir")
+    assert not fenced(other, "dir") and not fenced(KAP / "clip.mp4", "file")
+    assert not fenced(KAP / "sub" / ("a" * 32 + ".mp4"), "file")
+
+
+def test_recordings_by_kind_and_video_folders_only_by_number():
+    vids = H / "product"
+    for p in ("Downloads/Kapture 2026-10-01 at 10.00.00.mp4", "Downloads/clip.mp4", "Movies/2026-10-01 10-00-00.mkv",
+              "Movies/2026-10-01 10-00-00 - edit.mp4", "Movies/TV/show.mp4", "product/calls/standup.mp4",
+              "product/repos/app/demo.mp4"):
+        write(H / p)
+    for d in ("Downloads", "Movies", "product"):
+        age(H / d)
+    with configured({"video_dirs": [{"path": "~/product", "skip": ["repos"]}]}):
+        items, _ = dc.recording_items(argparse.Namespace(recording_days=7, kap_days=5, kap_exported_days=2))
+        got = {os.path.relpath(i["path"], H): i["auto"] for i in items if not i["path"].startswith(str(KAP))}
+        assert got == {"Downloads/Kapture 2026-10-01 at 10.00.00.mp4": True, "Movies/2026-10-01 10-00-00.mkv": True,
+                       "Movies/2026-10-01 10-00-00 - edit.mp4": False, "product/calls/standup.mp4": False}, got
+        fenced = lambda p: dc.fenced({"cat": "recordings", "path": str(p), "kind": "file"})
+        assert fenced(vids / "calls/standup.mp4")
+        assert not fenced(vids / "repos/app/demo.mp4") and not fenced(H / "Downloads/clip.mp4")
+
+
+def test_pool_build_output_goes_when_clean_and_untouched_today_or_dirty_and_untouched_for_a_week():
+    pool = H / "pool"
+    with configured({"pools": [{"root": "~/pool", "checkouts": ["slot-*"]}]}):
+        old, _ = repo("slot-old", pool)
+        fresh, _ = repo("slot-fresh", pool)
+        age(fresh, time.time())
+        for name, days in (("slot-dirty", 3), ("slot-stale", 30)):
+            r, _ = repo(name, pool)
+            write(r / "notes.txt")
+            age(r, time.time() - days * dc.DAY)
+        dirs = dc.pool_checkouts()
+        assert [d.name for d in dirs] == ["slot-dirty", "slot-fresh", "slot-old", "slot-stale"], dirs
+        items = dc.pool_builds({d: dc.repo_state(d) for d in dirs}, [], "/", dc.midnight(0), dc.midnight(6),
+                               "clean", "dirty")
+        assert {Path(i["path"]).name: i["dirty_ok"] for i in items} == {"slot-old": False, "slot-stale": True}, items
+        dc.processes = lambda: ""
+        item = next(i for i in items if i["path"] == str(old))
+        assert dc.recheck(item) is None, dc.recheck(item)
+        write(old / "notes.txt")
+        age(old)
+        assert dc.recheck(item) == "the checkout has uncommitted changes now"
+    with configured({"pools": [{"root": "~/pool", "checkouts": ["slot-*"], "build_dirs": ["build"]}]}):
+        dirs = dc.pool_checkouts()
+        items = dc.pool_builds({d: dc.repo_state(d) for d in dirs}, [], "/", dc.midnight(0), dc.midnight(6), "", "")
+        assert items == [], "node_modules is not in this pool's build_dirs"
+
+
+def test_idle_clean_pool_checkout_goes_whole_and_dirty_or_claimed_ones_are_kept():
+    pool = H / "pool2"
+    with configured({"pools": [{"root": "~/pool2", "checkouts": ["slot-*"], "claims": "claims.json"}]}):
+        clean, ended, taken = pushed("slot-clean", pool), pushed("slot-ended", pool), pushed("slot-taken", pool)
+        dirty = pushed("slot-dirty", pool)
+        write(dirty / "notes.txt")
+        age(dirty)
+        done = subprocess.Popen(["true"])
+        done.wait()
+        (pool / "claims.json").write_text(json.dumps({str(taken): {"pid": str(os.getpid())},
+                                                      str(ended): {"pid": str(done.pid)}}))
+        dirs = dc.pool_checkouts()
+        dc.processes = lambda: ""
+        in_use = dc.held(dirs)
+        assert in_use == {str(taken)}, "a claim whose session ended reserves nothing"
+        repos, kept = dc.pool_items({d: dc.repo_state(d) for d in dirs}, in_use, 20, "/")
+        assert sorted(Path(r["path"]).name for r in repos) == ["slot-clean", "slot-ended"], repos
+        assert all(r["auto"] for r in repos)
+        why = {d.name: w for d, w in kept}
+        assert why["slot-dirty"].startswith("1 modified or untracked files"), why
+        assert why["slot-taken"].startswith("a running process uses it"), why
+        assert dc.fenced({"cat": "checkouts", "path": str(clean), "kind": "dir"})
+        assert not dc.fenced({"cat": "checkouts", "path": str(pool), "kind": "dir"})
+
+
+def test_orphan_apps_only_when_the_recorded_checkout_is_gone_and_signed_before_idle_hours():
+    apps, here = H / ".cache/apps", H / "work/checkout"
+    here.mkdir(parents=True)
+    for name, top, days in (("gone-old", H / "nowhere/a", 2), ("here", here, 2), ("gone-fresh", H / "nowhere/b", 0),
+                            ("legacy", None, 2)):
+        (apps / name).mkdir(parents=True)
+        if top:
+            write(apps / name / "checkout", str(top))
+        age(apps / name, time.time() - days * dc.DAY)
+    with configured({"signed_apps": "~/.cache/apps"}):
+        assert [Path(i["path"]).name for i in dc.orphan_apps(8)] == ["gone-old"]
+        assert dc.fenced({"cat": "devices", "path": str(apps / "gone-old"), "kind": "dir"})
+        assert not dc.fenced({"cat": "devices", "path": str(here), "kind": "dir"})
+
+
+def test_phone_db_copies_but_the_newest_and_the_last_hour_and_their_fence():
+    phones = H / ".cache/phones"
+    for phone in ("p1", "p2"):
+        for stamp in ("20261101-000000", "20261102-000000", "20261103-000000"):
+            write(phones / phone / "db" / stamp / "app.db")
+    age(phones)
+    age(phones / "p2/db/20261102-000000", time.time())  # a test may still read it
+    with configured({"phone_db_copies": "~/.cache/phones/*/db"}):
+        got = sorted(os.path.relpath(i["path"], phones) for i in dc.db_copies())
+        assert got == ["p1/db/20261101-000000", "p1/db/20261102-000000", "p2/db/20261101-000000"], got
+        assert dc.fenced({"cat": "devices", "path": str(phones / "p1/db/20261101-000000"), "kind": "dir"})
+        assert not dc.fenced({"cat": "devices", "path": str(phones / "p1/db"), "kind": "dir"})
+
+
+def test_config_from_the_folder_upward_and_else_the_one_found_last():
+    proj, other = TMP / "proj", TMP / "other"
+    write(proj / ".claude/config/project.json", json.dumps({"disk_cleanup": {"signed_apps": "~/apps"}}))
+    write(other / ".claude/config/project.json", json.dumps({"locale": "en"}))
+    (proj / "src").mkdir()
+    here = os.getcwd()
+    try:
+        os.chdir(proj / "src")
+        assert dc.load_config() == (proj / ".claude/config/project.json", {"signed_apps": "~/apps"})
+        os.chdir(other)
+        assert dc.load_config()[0] == proj / ".claude/config/project.json", "a config without the block falls back"
+        os.chdir("/")
+        assert dc.load_config()[1] == {"signed_apps": "~/apps"}
+    finally:
+        os.chdir(here)
 
 
 if __name__ == "__main__":

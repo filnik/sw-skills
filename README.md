@@ -23,6 +23,21 @@ reading the history, checking production crashes, and knowing where you are.
 | `/dev:disk-cleanup` | Finds regenerable build output in idle projects, stale Xcode and Gradle data and caches, shows a numbered report, deletes only what you pick after re-checking each item. | what you pick |
 | `/dev:memguard` | Installs a background guard that kills a command started by Claude Code or Codex when its memory explodes (20 GB and still growing fast, or 30 GB), before the Mac freezes; tells you what it killed. macOS. | a LaunchAgent, on install |
 | `/dev:device-test` | Tests your app on real phones (Android via adb, iPhone via WebDriverAgent): a scenario runs whole in one call, one line per step, one verdict. Claude writes the plan, the `device-tester` agent runs it. | scenarios in `device-tests/` |
+| `/dev:pr-review` | Reviews a PR end to end through parallel Codex runs: the ticket's requirements and the fit with the app's flow, test coverage, bugs and missed reuse, and the ticket's checks on real phones. Claude writes the brief, verifies every finding against the code and reports one table. | small fixes on your own PR; a pending review on a colleague's, on your ok |
+| `/dev:tested` | Says whether the current PR was tested on the real phones: which check passed on which phone and build, the phones still missing, and whether it needs one phone, two at once or both Android and iOS. Reads the `device-test` ledger and the conversation. | nothing |
+| `/dev:sub-codex` | Hands a well-scoped sub-task to the Codex CLI (`codex exec`) and brings back only its final summary, so the work is paid from the Codex quota. A prompt hook routes medium tasks between Codex and Claude agents by each side's weekly usage. | what the task asks, never git |
+
+And three agents, which the skills spawn (`dev:<name>` once the plugin is installed):
+
+| Agent | What it does |
+|---|---|
+| `device-tester` | Runs a `device-test` plan on the phones and returns only the verdict table (Sonnet). |
+| `sub-claude` | A Claude worker for sub-tasks that would fill the main conversation (diagnoses, plans, reviews, larger implementations), and for the tasks `sub-codex` hands back to Claude when Codex is kept in reserve or used up. Returns a summary under 25 lines. |
+| `artifact-maker` | Makes and updates one claude.ai Artifact (design mockups, report pages, dashboards, whiteboards) in its own context and returns the URL and at most 5 lines; feedback goes to the same agent, which republishes on the same URL. |
+
+`pr-review`, `tested`, `sub-codex`, `sub-claude` and `artifact-maker` are the author's daily versions and still
+assume his work setup: the DocuSketch folders under `~/Documents/projects/docusketch`, its mobile repo and Jira, the
+Codex CLI, and the phones of `device-test`.
 
 You don't have to type the commands: "pick the next bug", "open an issue for this", "search online how to…",
 "commit and push", "open the PR", "what do the reviewers say", "fix the conflicts", "why is CI red", "where are we",
@@ -68,6 +83,52 @@ To try the plugin from a clone without installing it: `claude --plugin-dir .`.
 
 Requirements: `git`, the [GitHub CLI](https://cli.github.com) logged in (`gh auth login`), `python3` 3.9+, `bash`.
 No other dependencies.
+
+## Use the skills without installing
+
+To run the skills straight from a clone, so that a `git pull` updates them, link the ones you want one by one:
+
+```bash
+repo=~/path/to/sw-skills
+ln -s "$repo/skills/<name>" ~/.claude/skills/<name>
+ln -s "$repo/agents/<name>.md" ~/.claude/agents/<name>.md
+```
+
+A linked skill keeps its bare name, `/<name>` (and the agent `<name>`). The plugin install namespaces them instead,
+as `/dev:<name>` and `dev:<name>`; with both you get both.
+
+`pr-review`, `tested` and `sub-codex` call their scripts, and each other, through `~/.claude/skills/<name>/…`
+paths, so they need the link (or a copy) there. `sub-codex` also expects, in `settings.json`, its command
+`bash ~/.claude/skills/sub-codex/scripts/sub-codex.sh` in `sandbox.excludedCommands` (Codex cannot start inside
+Claude's sandbox) and `python3 ~/.claude/skills/sub-codex/scripts/quota-route.py` as a `UserPromptSubmit` hook,
+which adds the `quota route:` line to every prompt.
+
+## Config
+
+Some skills read a per-project file, `.claude/config/project.json`. They look for it from the current folder upward
+through every parent folder and merge what they find, the nearest file winning key by key, so a repo's own
+config adds to one kept in a folder above it instead of hiding it. Every key is optional:
+
+```json
+{
+  "locale": "en",
+  "playbook": ".claude/config/playbook.md",
+  "clickup": {"list_id": "901234567"},
+  "babysit": {"ignore_checks": ["PR Safeness"], "skip_comments": ["<!-- preview-builds-hint -->"],
+              "copilot": {"request": true, "auto_review_bases": ["main"]}},
+  "disk_cleanup": {"pools": [{"root": "~/work", "checkouts": ["app-[0-9]*"]}], "defaults": {"derived_days": 2}}
+}
+```
+
+- `locale`: the language of text the skills post for others (GitHub replies, PR comments); default `en`. The skills
+  talk to you in your own language.
+- `playbook`: a Markdown file with your own procedures, one section per skill, relative to the folder that holds
+  `.claude/`. When it exists, babysit, commit-push and disk-cleanup read it, and where it and a skill both speak, the
+  playbook wins.
+- One block per skill: `clickup` (pick, ticket), `babysit`, `disk_cleanup`. Each skill's SKILL.md lists its keys.
+
+Keep the file out of git when it holds private paths or team rules. `python3 shared/project_config.py [<key>]`
+prints what the skills see from the current folder.
 
 ## Issue trackers
 
@@ -166,7 +227,14 @@ skills/release-notes/scripts/release_prs.py  the PRs between two tags, grouped, 
 skills/device-test/scripts/devtest*.py     the phone test runner: drivers, scenarios, leases (Python, stdlib only)
 skills/disk-cleanup/scripts/disk_cleanup.py  scan, numbered plan, re-checked deletion (Python, stdlib only)
 skills/memguard/scripts/memguard.py        the memory guard (Python, stdlib only); install.sh runs it as a LaunchAgent
+skills/pr-review/codex/*.md                the instructions of pr-review's Codex streams
+skills/tested/scripts/tested.py            what of a PR the device-test ledger shows as tested (Python, stdlib only)
+skills/sub-codex/scripts/sub-codex.sh      runs codex exec, or hands the task to a Claude agent (bash)
+skills/sub-codex/scripts/quota-route.py    the Codex or Claude route and the tier, from both weekly quotas (Python, stdlib only)
+skills/sub-codex/scripts/test-*            sub-codex's own tests
 agents/device-tester.md                    the agent that runs device-test plans
+agents/sub-claude.md                       the Claude worker for delegated sub-tasks
+agents/artifact-maker.md                   the agent that builds claude.ai Artifacts
 tests/                                     one test file per script
 ```
 
@@ -176,6 +244,7 @@ tests/                                     one test file per script
 claude plugin validate .
 python3 tests/test_babysit.py && python3 tests/test_clickup.py && python3 tests/test_my_prs.py && python3 tests/test_release_notes.py && python3 tests/test_disk_cleanup.py && python3 tests/test_memguard.py && bash tests/test_merge.sh
 for t in tests/test_devtest_*.py; do python3 "$t"; done
+python3 skills/sub-codex/scripts/test-route.py && python3 skills/sub-codex/scripts/test-astra.py && bash skills/sub-codex/scripts/test-docusketch-only.sh
 claude plugin marketplace add ./      # try it locally without going through GitHub
 ```
 

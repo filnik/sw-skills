@@ -10,6 +10,15 @@ ok, once, to commit and push the current work. It is not a standing permission: 
 request. If you chose this skill yourself or another skill handed over, show what you would commit and wait for an
 ok.
 
+## 0. Project rules
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/../../shared/project_config.py" playbook
+```
+
+If it prints a path, the project's `.claude/config/project.json` names a `playbook` that exists: read it and follow
+its commit-push section. Where the playbook and this skill both speak, the playbook wins, except for the Never list.
+
 ## 1. Look
 
 ```bash
