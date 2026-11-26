@@ -32,6 +32,7 @@ import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -41,14 +42,11 @@ from devtest_common import cfg, need
 BUNDLE = cfg("ios.bundle_id") or ""
 LOCAL_PORT = 18100
 DEVICE_PORT = 8100
-WDA_URL = "http://127.0.0.1:%d" % LOCAL_PORT
 
 STATE = Path(cfg("ios.state_dir")).expanduser() if cfg("ios.state_dir") else common.STATE / "ios"
 LOGS = STATE / "logs"
 APPS = STATE / "apps"
 WDA_DD = STATE / "wda-dd"
-PIDS = STATE / "pids.json"
-CONSOLE_LOG = LOGS / "app-console.log"
 PROFILE_DIRS = [
     Path.home() / "Library/Developer/Xcode/UserData/Provisioning Profiles",
     Path.home() / "Library/MobileDevice/Provisioning Profiles",
@@ -191,6 +189,23 @@ def pick_udid(explicit) -> str:
     if len(udids) > 1:
         raise Fail("several devices on USB, pass --udid: %s" % ", ".join(udids))
     return udids[0]
+
+
+class Channel:
+    """One iPhone's WDA port, pids, logs and WDA build. The pack's default iPhone keeps 18100 and the paths of before,
+    so a WDA it already runs stays usable; any other iPhone gets a port and a folder from its UDID."""
+
+    def __init__(self, udid: str):
+        self.udid = udid
+        alias = common.DEFAULT_FOR.get("ios") or ""
+        is_default = _norm(udid) == _norm(common.DEVICES.get(alias, ("", alias))[1])
+        self.port = LOCAL_PORT if is_default else LOCAL_PORT + 1 + zlib.crc32(_norm(udid).encode()) % 899
+        self.dir = STATE if is_default else STATE / "phones" / _norm(udid)
+        self.logs = self.dir / "logs"
+        self.pids = self.dir / "pids.json"
+        self.console = self.logs / "app-console.log"
+        self.wda_dd = self.dir / "wda-dd"
+        self.url = "http://127.0.0.1:%d" % self.port
 
 
 # ---------------------------------------------------------------------------------------- worktree
@@ -398,16 +413,16 @@ def cmd_install(a) -> None:
 
 # ---------------------------------------------------------------------------------------- processes
 
-def load_pids() -> dict:
+def load_pids(ch) -> dict:
     try:
-        return json.loads(PIDS.read_text())
+        return json.loads(ch.pids.read_text())
     except (OSError, ValueError):
         return {}
 
 
-def save_pids(pids: dict) -> None:
-    STATE.mkdir(parents=True, exist_ok=True)
-    PIDS.write_text(json.dumps(pids))
+def save_pids(ch, pids: dict) -> None:
+    ch.pids.parent.mkdir(parents=True, exist_ok=True)
+    ch.pids.write_text(json.dumps(pids))
 
 
 def alive(pid) -> bool:
@@ -418,42 +433,51 @@ def alive(pid) -> bool:
         return False
 
 
-def stop(name: str) -> None:
-    pids = load_pids()
+def serves(ch) -> bool:
+    """WDA's /status does not name its phone: the WDA on ch's port is ch's phone only when ch's forward tunnels there."""
+    pid = load_pids(ch).get("forward")
+    try:
+        return alive(pid) and _norm(ch.udid) in _norm(run(["ps", "-o", "command=", "-p", str(pid)]).stdout)
+    except OSError:  # ps is not allowed inside a sandbox: pick_udid then says to run without it
+        return False
+
+
+def stop(ch, name: str) -> None:
+    pids = load_pids(ch)
     pid = pids.pop(name, None)
     if pid and alive(pid):
         try:
             os.killpg(int(pid), signal.SIGTERM)
         except OSError:
             os.kill(int(pid), signal.SIGTERM)
-    save_pids(pids)
+    save_pids(ch, pids)
 
 
-def spawn(name: str, cmd: list, log: Path) -> int:
-    stop(name)
-    LOGS.mkdir(parents=True, exist_ok=True)
+def spawn(ch, name: str, cmd: list, log: Path) -> int:
+    stop(ch, name)
+    log.parent.mkdir(parents=True, exist_ok=True)
     f = open(log, "a")
     f.write("==== %s %s\n" % (name, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     f.flush()
     p = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
-    pids = load_pids()
+    pids = load_pids(ch)
     pids[name] = p.pid
-    save_pids(pids)
+    save_pids(ch, pids)
     return p.pid
 
 
 # ---------------------------------------------------------------------------------------- WDA
 
-def http(method: str, path: str, body=None, timeout: float = 60):
+def http(ch, method: str, path: str, body=None, timeout: float = 60):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(WDA_URL + path, data=data, method=method, headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(ch.url + path, data=data, method=method, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read() or b"{}")
 
 
-def wda_up() -> bool:
+def wda_up(ch) -> bool:
     try:
-        return http("GET", "/status", timeout=3).get("value", {}).get("ready", True) is not False
+        return http(ch, "GET", "/status", timeout=3).get("value", {}).get("ready", True) is not False
     except (OSError, ValueError, urllib.error.URLError):
         return False
 
@@ -463,8 +487,10 @@ def latest(pattern: str):
     return Path(max(found, key=os.path.getmtime)) if found else None
 
 
-def wda_xctestrun() -> Path:
-    products = WDA_DD / "Build/Products"
+def wda_xctestrun(ch) -> Path:
+    products = ch.wda_dd / "Build/Products"
+    if not products.exists() and (WDA_DD / "Build/Products").is_dir():
+        shutil.copytree(WDA_DD / "Build/Products", products, symlinks=True)  # one build serves every iPhone
     run_file = latest(str(products / "*.xctestrun"))
     runner = products / "Debug-iphoneos/WebDriverAgentRunner-Runner.app"
     ipa = latest(SIGNED_WDA_GLOB)
@@ -477,11 +503,11 @@ def wda_xctestrun() -> Path:
             command = ["npm", "install", "--prefix", str(WDA_LOCAL_PROJECT.parents[2]), "appium-webdriveragent"]
             raise Fail("BLOCKED: WebDriverAgent sources missing. Run: %s; then retry `wda start`." %
                        shlex.join(command))
-        log = LOGS / "wda-build.log"
-        LOGS.mkdir(parents=True, exist_ok=True)
+        log = ch.logs / "wda-build.log"
+        ch.logs.mkdir(parents=True, exist_ok=True)
         say("building WebDriverAgent for testing (once) from %s -> %s" % (project, log))
         command = ["xcodebuild", "-project", str(project), "-scheme", "WebDriverAgentRunner",
-                   "-destination", "generic/platform=iOS", "-derivedDataPath", str(WDA_DD),
+                   "-destination", "generic/platform=iOS", "-derivedDataPath", str(ch.wda_dd),
                    "CODE_SIGNING_ALLOWED=%s" % ("YES" if ipa is None else "NO"),
                    # WDA's own xcconfig turns warnings into errors, and a stray
                    # /usr/local/include warning then fails the runner.
@@ -499,16 +525,16 @@ def wda_xctestrun() -> Path:
                            "prepare automatic signing, then run:\n%s\nBuild log: %s" % (
                                shlex.join(["open", "-a", "Xcode", str(project)]), cfg("ios.team_id"),
                                shlex.join(command), log))
-            (STATE / "wda-runner.src").unlink(missing_ok=True)
+            (ch.dir / "wda-runner.src").unlink(missing_ok=True)
             say("WebDriverAgent runner signed locally by Xcode")
             return run_file
         if code != 0 or run_file is None:
             raise Fail("WebDriverAgent build-for-testing failed, see %s" % log)
 
-    marker = STATE / "wda-runner.src"
+    marker = ch.dir / "wda-runner.src"
     stamp = "%s %d" % (ipa, int(ipa.stat().st_mtime))
     if not runner.exists() or not marker.exists() or marker.read_text() != stamp:
-        unpacked = STATE / "wda-ipa"
+        unpacked = ch.dir / "wda-ipa"
         if unpacked.exists():
             shutil.rmtree(unpacked)
         with zipfile.ZipFile(ipa) as z:
@@ -527,43 +553,49 @@ def wda_xctestrun() -> Path:
 
 
 def cmd_wda(a) -> None:
+    ch = Channel(a.udid or pick_udid(None))
     if a.action == "stop":
-        stop("wda")
-        stop("forward")
-        stop("baa-forward")
+        stop(ch, "wda")
+        stop(ch, "forward")
+        stop(ch, "baa-forward")
         say("WebDriverAgent and the port forwards stopped")
         return
     if a.action == "status":
-        pids = load_pids()
-        say("wda pid %s alive=%s, forward pid %s alive=%s, %s answers=%s" % (
-            pids.get("wda"), alive(pids.get("wda")), pids.get("forward"), alive(pids.get("forward")), WDA_URL, wda_up()))
+        pids = load_pids(ch)
+        say("wda pid %s alive=%s, forward pid %s alive=%s, %s answers=%s, tunnels to %s=%s" % (
+            pids.get("wda"), alive(pids.get("wda")), pids.get("forward"), alive(pids.get("forward")), ch.url, wda_up(ch),
+            ch.udid, serves(ch)))
         return
-    udid = pick_udid(a.udid)
-    if wda_up() and alive(load_pids().get("wda")):
-        say("WebDriverAgent already answers on %s" % WDA_URL)
+    udid = pick_udid(ch.udid)
+    forward_cmd = [sys.executable, str(Path(__file__).resolve()), "--udid", udid, "_forward", "--local", str(ch.port)]
+    if wda_up(ch) and alive(load_pids(ch).get("wda")) and serves(ch):
+        say("WebDriverAgent already answers on %s" % ch.url)
         return
-    if alive(load_pids().get("wda")) and not alive(load_pids().get("forward")):
+    if alive(load_pids(ch).get("wda")) and not alive(load_pids(ch).get("forward")):
         # The forward exits after FORWARD_IDLE with no client while WDA keeps running: restart only the forward.
-        spawn("forward", [sys.executable, str(Path(__file__).resolve()), "--udid", udid, "_forward"], LOGS / "forward.log")
+        spawn(ch, "forward", forward_cmd, ch.logs / "forward.log")
         for _ in range(10):
-            if wda_up():
-                say("WebDriverAgent answers again on %s (port forward restarted)" % WDA_URL)
+            if wda_up(ch) and serves(ch):
+                say("WebDriverAgent answers again on %s (port forward restarted)" % ch.url)
                 return
             time.sleep(0.5)
-    xctestrun = wda_xctestrun()
-    log = LOGS / "wda-run.log"
-    spawn("wda", ["xcodebuild", "test-without-building", "-xctestrun", str(xctestrun), "-destination", "id=%s" % udid], log)
-    spawn("forward", [sys.executable, str(Path(__file__).resolve()), "--udid", udid, "_forward"], LOGS / "forward.log")
+    xctestrun = wda_xctestrun(ch)
+    log = ch.logs / "wda-run.log"
+    spawn(ch, "wda", ["xcodebuild", "test-without-building", "-xctestrun", str(xctestrun), "-destination", "id=%s" % udid],
+          log)
+    spawn(ch, "forward", forward_cmd, ch.logs / "forward.log")
     say("starting WebDriverAgent on %s (keep the phone unlocked)..." % udid)
     deadline = time.time() + 150
     while time.time() < deadline:
-        if wda_up():
-            say("WebDriverAgent ready on %s" % WDA_URL)
+        if wda_up(ch) and serves(ch):
+            say("WebDriverAgent ready on %s" % ch.url)
             say("Use `launch` or `ui src`: the script creates its WDA HTTP session automatically.")
             return
-        if not alive(load_pids().get("wda")):
+        if not alive(load_pids(ch).get("wda")) or not alive(load_pids(ch).get("forward")):
             break
         time.sleep(2)
+    if not alive(load_pids(ch).get("forward")):
+        raise Fail("the port forward on 127.0.0.1:%d stopped (port taken?): see %s" % (ch.port, ch.logs / "forward.log"))
     tail = log.read_text(errors="replace").splitlines()[-25:]
     raise Fail("WebDriverAgent did not come up. Unlock the phone; if it asks, trust the developer in "
                "Settings > General > VPN & Device Management. Log tail:\n" + "\n".join(tail))
@@ -571,23 +603,23 @@ def cmd_wda(a) -> None:
 
 # ---------------------------------------------------------------------------------------- ui
 
-def sid() -> str:
-    s = http("GET", "/status").get("sessionId")
+def sid(ch) -> str:
+    s = http(ch, "GET", "/status").get("sessionId")
     if not s:
         # forceAppLaunch false: after a WDA restart the new session attaches to the running app instead of relaunching it.
         caps = {"capabilities": {"alwaysMatch": {"bundleId": need("ios.bundle_id"), "shouldWaitForQuiescence": False,
                                                  "forceAppLaunch": False}}}
-        s = http("POST", "/session", caps)["sessionId"]
+        s = http(ch, "POST", "/session", caps)["sessionId"]
     return s
 
 
-def touch(actions: list) -> None:
-    http("POST", "/session/%s/actions" % sid(), {"actions": [
+def touch(ch, actions: list) -> None:
+    http(ch, "POST", "/session/%s/actions" % sid(ch), {"actions": [
         {"type": "pointer", "id": "f1", "parameters": {"pointerType": "touch"}, "actions": actions}]})
 
 
-def ui_src(flt) -> None:
-    root = ET.fromstring(http("GET", "/source?format=xml&excluded_attributes=", timeout=120)["value"])
+def ui_src(ch, flt) -> None:
+    root = ET.fromstring(http(ch, "GET", "/source?format=xml&excluded_attributes=", timeout=120)["value"])
     screens, rows = [], []
     for el in root.iter():
         name, label, value = el.get("name"), el.get("label"), el.get("value")

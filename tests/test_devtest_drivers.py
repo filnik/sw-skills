@@ -20,6 +20,7 @@ import devtest_android as A  # noqa: E402
 import devtest_common as C  # noqa: E402
 import devtest_guard as G  # noqa: E402
 import devtest_ios as I  # noqa: E402
+import devtest_wda as W  # noqa: E402
 from flows import pair, phone  # noqa: E402
 
 DUMP = """<hierarchy rotation="0">
@@ -56,6 +57,33 @@ def test_ios_locators():
     assert I.IOS.query("login.submit") == ("accessibility id", "login.submit")
     assert I.IOS.query("text:Sign in") == ("predicate string", "label == 'Sign in' OR value == 'Sign in'")
     assert I.IOS.query("text~it's") == ("predicate string", "label CONTAINS[c] 'it\\'s' OR value CONTAINS[c] 'it\\'s'")
+
+
+def test_each_iphone_has_its_own_wda_channel_and_reuses_only_a_wda_that_tunnels_to_it():
+    default, other = "TEST-PHONE-A", "TEST-PHONE-B"
+    with mock.patch.dict(C.DEVICES, {"iphone": ("ios", default)}), mock.patch.dict(C.DEFAULT_FOR, {"ios": "iphone"}):
+        a, b = W.Channel(default), W.Channel(other)
+    assert (a.port, a.pids, a.console, a.wda_dd) == (18100, W.STATE / "pids.json", W.LOGS / "app-console.log", W.WDA_DD), \
+        "the pack's default iPhone keeps the port and paths its running WDA was started with"
+    assert b.port != 18100 and b.port == W.Channel(other.replace("-", "")).port and b.dir != a.dir
+    W.save_pids(b, {"wda": os.getpid(), "forward": os.getpid()})
+
+    def forward_to(udid):
+        ps = SimpleNamespace(stdout="python3 devtest_wda.py --udid %s _forward" % udid)
+        return mock.patch.object(W, "run", return_value=ps)
+
+    start = SimpleNamespace(action="start", udid=other)
+    with mock.patch.object(W, "pick_udid", lambda u: u), mock.patch.object(W, "wda_up", lambda ch: True), \
+            mock.patch.object(W, "wda_xctestrun", side_effect=RuntimeError("starts its own WDA")):
+        with forward_to(other), mock.patch.object(W, "say") as said:
+            W.cmd_wda(start)
+        assert "already answers" in said.call_args[0][0]
+        with forward_to(default):
+            try:
+                W.cmd_wda(start)
+                raise AssertionError("reused a WDA whose forward tunnels to another iPhone")
+            except RuntimeError:
+                pass
 
 
 def test_prefs_codec_reads_and_writes_datastore_and_plist():

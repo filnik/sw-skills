@@ -51,7 +51,8 @@ class IOS:
     def __init__(self, udid: str, alias: str):
         self.udid, self.alias = udid, alias
         self.dir = device_dir(udid)
-        self.log = idev.CONSOLE_LOG
+        self.ch = idev.Channel(udid)
+        self.log = self.ch.console
 
     @property
     def app(self) -> str:
@@ -62,7 +63,7 @@ class IOS:
     def http(self, method: str, path: str, body=None, timeout: float = 60):
         for attempt in (1, 2):
             try:
-                return idev.http(method, path, body, timeout)
+                return idev.http(self.ch, method, path, body, timeout)
             except urllib.error.HTTPError as e:
                 detail, error = "", ""
                 try:
@@ -91,7 +92,7 @@ class IOS:
     def sid(self) -> str:
         for attempt in (1, 2):
             try:
-                return idev.sid()
+                return idev.sid(self.ch)
             except (urllib.error.URLError, OSError, KeyError, ValueError) as e:
                 if attempt == 2 or not self.restart_wda_if_dead():
                     raise Blocked("no WDA session (%s)" % short(str(e), 120))
@@ -106,7 +107,7 @@ class IOS:
         """Bundle id of the app in front, None when WDA cannot tell. A notification banner can take a tap meant for
         the app (TestFlight's 'new build' banner once opened TestFlight in the middle of a step)."""
         try:
-            return (idev.http("GET", "/wda/activeAppInfo", None, 10).get("value") or {}).get("bundleId")
+            return (idev.http(self.ch, "GET", "/wda/activeAppInfo", None, 10).get("value") or {}).get("bundleId")
         except Exception:  # noqa: BLE001 - only a hint for the verdict
             return None
 
@@ -117,12 +118,12 @@ class IOS:
         a step ("BUILD INTERRUPTED" in wda-run.log)."""
         deadline = time.time() + 10
         while True:
-            if idev.wda_up():
+            if idev.wda_up(self.ch):
                 return method == "GET" or bool(re.search(r"/elements?$", path))
             # Busy, not dead: WDA serves one request at a time, and while it is still writing its log it is alive.
             # Restarting it then killed a live WDA whose new session relaunched the app ("Connection reset by peer"
             # lines up to the kill, "BUILD INTERRUPTED" in wda-run.log).
-            log = idev.LOGS / "wda-run.log"
+            log = self.ch.logs / "wda-run.log"
             if time.time() >= deadline and not (log.exists() and time.time() - log.stat().st_mtime < 10
                                                 and time.time() < deadline + 60):
                 break
@@ -133,7 +134,7 @@ class IOS:
         return True
 
     def ensure_wda(self) -> None:
-        if idev.wda_up():
+        if idev.wda_up(self.ch) and idev.serves(self.ch):
             return
         try:
             with contextlib.redirect_stdout(io.StringIO()):
@@ -392,9 +393,9 @@ class IOS:
         w, h = self.window()
         a, b = int(h * 0.75), int(h * 0.3)
         y1, y2 = {"up": (a, b), "down": (b, a)}[direction]
-        idev.touch([{"type": "pointerMove", "duration": 0, "x": w // 2, "y": y1}, {"type": "pointerDown"},
-                    {"type": "pause", "duration": 100}, {"type": "pointerMove", "duration": 350, "x": w // 2, "y": y2},
-                    {"type": "pointerUp"}])
+        idev.touch(self.ch, [{"type": "pointerMove", "duration": 0, "x": w // 2, "y": y1}, {"type": "pointerDown"},
+                             {"type": "pause", "duration": 100}, {"type": "pointerMove", "duration": 350, "x": w // 2, "y": y2},
+                             {"type": "pointerUp"}])
 
     def _drag(self, x: float, y0: float, y1: float, duration: float) -> None:
         self.http("POST", "/session/%s/wda/dragfromtoforduration" % self.sid(),
@@ -430,15 +431,15 @@ class IOS:
         # From inside the list: a drag that starts in a gap above the scroll view (under a tab selector, say)
         # fires no pull-to-refresh.
         w, h = self.window()
-        idev.touch([{"type": "pointerMove", "duration": 0, "x": w // 2, "y": int(h * 0.38)}, {"type": "pointerDown"},
-                    {"type": "pause", "duration": 100}, {"type": "pointerMove", "duration": 700, "x": w // 2, "y": int(h * 0.85)},
-                    {"type": "pointerUp"}])
+        idev.touch(self.ch, [{"type": "pointerMove", "duration": 0, "x": w // 2, "y": int(h * 0.38)}, {"type": "pointerDown"},
+                             {"type": "pause", "duration": 100}, {"type": "pointerMove", "duration": 700, "x": w // 2, "y": int(h * 0.85)},
+                             {"type": "pointerUp"}])
 
     def src(self, flt=None) -> list:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             try:
-                idev.ui_src(flt)
+                idev.ui_src(self.ch, flt)
             except (urllib.error.URLError, OSError) as e:
                 raise Blocked("WDA source failed: %s" % short(str(e), 120))
         return buf.getvalue().splitlines()
@@ -471,12 +472,12 @@ class IOS:
         since = set_mark(self.udid, self.log, "launch")
         started = time.time()
         if restart or self.app_state() < 3:
-            idev.spawn("console", ["xcrun", "devicectl", "device", "process", "launch", "--device", self.udid,
-                                   "--terminate-existing", "--console", "--environment-variables",
-                                   # console_debug turns on debug-level os_log in the launched process only
-                                   ('{"OS_ACTIVITY_DT_MODE": "enable", "OS_ACTIVITY_MODE": "debug"}'
-                                    if getattr(self, "console_debug", False) else '{"OS_ACTIVITY_DT_MODE": "enable"}'),
-                                   self.app, *(cfg("ios.launch_args") or [])], self.log)
+            idev.spawn(self.ch, "console", ["xcrun", "devicectl", "device", "process", "launch", "--device", self.udid,
+                                            "--terminate-existing", "--console", "--environment-variables",
+                                            # console_debug turns on debug-level os_log in the launched process only
+                                            ('{"OS_ACTIVITY_DT_MODE": "enable", "OS_ACTIVITY_MODE": "debug"}'
+                                             if getattr(self, "console_debug", False) else '{"OS_ACTIVITY_DT_MODE": "enable"}'),
+                                            self.app, *(cfg("ios.launch_args") or [])], self.log)
         else:
             self.http("POST", "/session/%s/wda/apps/activate" % self.sid(), {"bundleId": self.app})
         deadline, handled, screens = time.time() + timeout, [], []
@@ -531,7 +532,7 @@ class IOS:
 
     def _alert(self) -> str:
         try:
-            return idev.http("GET", "/session/%s/alert/text" % self.sid(), timeout=10).get("value") or ""
+            return idev.http(self.ch, "GET", "/session/%s/alert/text" % self.sid(), timeout=10).get("value") or ""
         except (urllib.error.URLError, OSError, ValueError):
             return ""
 
@@ -676,15 +677,15 @@ class IOS:
         if not m:
             raise Blocked("no 'Baa started' line since the last launch: is this a Debug build with baa?")
         cache = load_json(self.dir / "baa.json", {})
-        pids = idev.load_pids()
+        pids = idev.load_pids(self.ch)
         if cache.get("device_port") == m.group(1) and idev.alive(pids.get("baa-forward")):
             return int(cache["host_port"])
         s = socket.socket()
         s.bind(("127.0.0.1", 0))
         host = s.getsockname()[1]
         s.close()
-        idev.spawn("baa-forward", [sys.executable, str(Path(idev.__file__).resolve()), "--udid", self.udid, "_forward",
-                                   "--local", str(host), "--remote", m.group(1)], idev.LOGS / "baa-forward.log")
+        idev.spawn(self.ch, "baa-forward", [sys.executable, str(Path(idev.__file__).resolve()), "--udid", self.udid, "_forward",
+                                            "--local", str(host), "--remote", m.group(1)], self.ch.logs / "baa-forward.log")
         time.sleep(0.5)
         save_json(self.dir / "baa.json", {"device_port": m.group(1), "host_port": host})
         return host
@@ -692,9 +693,9 @@ class IOS:
     def stop_tools(self) -> str:
         """`lease release`: the session is over, so WebDriverAgent, the console capture and both port forwards stop."""
         names = ("wda", "forward", "baa-forward", "console")
-        running = [n for n in names if idev.alive(idev.load_pids().get(n))]
+        running = [n for n in names if idev.alive(idev.load_pids(self.ch).get(n))]
         for name in names:
-            idev.stop(name)
+            idev.stop(self.ch, name)
         return "stopped %s" % ", ".join(running) if running else ""
 
     # ------------------------------------------------------------------------------------ build
