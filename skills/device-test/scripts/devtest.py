@@ -32,6 +32,8 @@
     tags check [SCENARIO.py] [-v]             selectors of flows (and the scenario) present in the worktree
     lint [SCENARIO.py ...]                    no flow re-implemented in a scenario, no helper copied between two
     api                                       regenerate the flows' API.md from the docstrings
+    pr [--file NOTE.md --phones a,b]          the branch's PR: print its device-test section, or write NOTE.md
+                                              there and tick the phones' boxes (config `pr`, see devtest_pr)
 
 The app's constants, phones, flows, scenarios and suites come from a pack (see devtest_common). Scenario paths that
 do not exist as given are looked up in the pack's scenarios/.
@@ -208,6 +210,9 @@ def main() -> int:
     sp = sub.add_parser("lint")
     sp.add_argument("files", nargs="*")
     sub.add_parser("api")
+    sp = sub.add_parser("pr")
+    sp.add_argument("--file", help="the new section (without its label); without it, print the current one")
+    sp.add_argument("--phones", default="", help="the aliases whose PR boxes to tick")
 
     a = p.parse_args()
     if a.owner:
@@ -312,6 +317,9 @@ def dispatch(a) -> int:
             print(line)
         say("tags check: %d missing, %d warning(s)" % (len(errors), len(warnings)))
         return 3 if errors else 0
+    if a.cmd == "pr":
+        import devtest_pr
+        return devtest_pr.pr(worktree(a.worktree), [x for x in a.phones.split(",") if x], a.file)
     if a.cmd == "suite":
         import devtest_suite
         top = worktree(a.worktree)

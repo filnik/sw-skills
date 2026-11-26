@@ -22,7 +22,7 @@ reading the history, checking production crashes, and knowing where you are.
 | `/dev:release-notes` | The release notes of a version from every PR merged since the last tag, written for users, in the repo's changelog format. | on your ok |
 | `/dev:disk-cleanup` | Finds regenerable build output in idle projects, stale Xcode and Gradle data and caches, shows a numbered report, deletes only what you pick after re-checking each item. | what you pick |
 | `/dev:memguard` | Installs a background guard that kills a command started by Claude Code or Codex when its memory explodes (20 GB and still growing fast, or 30 GB), before the Mac freezes; tells you what it killed. macOS. | a LaunchAgent, on install |
-| `/dev:device-test` | Tests your app on real phones (Android via adb, iPhone via WebDriverAgent): a scenario runs whole in one call, one line per step, one verdict. Claude writes the plan, the `device-tester` agent runs it. | a pack under `skills/device-test/packs/` |
+| `/dev:device-test` | Tests your app on real phones (Android via adb, iPhone via WebDriverAgent): a scenario runs whole in one call, one line per step, one verdict. Claude writes the plan, the `device-tester` agent runs it, and Claude then writes the results into the PR and ticks the phones tested. | a pack under `skills/device-test/packs/` |
 | `/dev:pr-review` | Reviews a PR end to end through parallel Codex runs: the ticket's requirements and the fit with the app's flow, test coverage, bugs and missed reuse, and the ticket's checks on real phones. Claude writes the brief, verifies every finding against the code and reports one table. | small fixes on your own PR; a pending review on a colleague's, on your ok |
 | `/dev:tested` | Says whether the current PR was tested on the real phones: which check passed on which phone and build, the phones still missing, and whether it needs one phone, two at once or both Android and iOS. Reads the `device-test` ledger and the conversation. | nothing |
 | `/dev:sub-codex` | Hands a well-scoped sub-task to the Codex CLI (`codex exec`) and brings back only its final summary, so the work is paid from the Codex quota. A prompt hook routes medium tasks between Codex and Claude agents by each side's weekly usage. | what the task asks, never git |
@@ -490,7 +490,7 @@ skills/merge/scripts/merge.sh              the git part of /dev:merge (bash)
 skills/pick/scripts/clickup.py             ClickUp API for pick and ticket (Python, stdlib only)
 skills/my-prs/scripts/my_prs.py            your open PRs, their next step and their lag, two GraphQL calls (Python, stdlib only)
 skills/release-notes/scripts/release_prs.py  the PRs between two tags, grouped, batched GraphQL (Python, stdlib only)
-skills/device-test/scripts/devtest*.py     the phone test runner: drivers, scenarios, leases (Python, stdlib only)
+skills/device-test/scripts/devtest*.py     the phone test runner: drivers, scenarios, leases, PR update (Python, stdlib only)
 skills/device-test/packs/<name>/           your app's pack: config, flows, scenarios (local, gitignored)
 skills/disk-cleanup/scripts/disk_cleanup.py  scan, numbered plan, re-checked deletion (Python, stdlib only)
 skills/memguard/scripts/memguard.py        the memory guard (Python, stdlib only); install.sh runs it as a LaunchAgent
